@@ -21,9 +21,8 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <tilem.h>
-#include <scancodes.h>
-
 #include "animation.h"
+#include "script.h"
 
 #define FRAME_MSEC 30
 #define FRAME_USEC (FRAME_MSEC * 1000)
@@ -34,11 +33,11 @@ static gchar* cl_model = NULL;
 static gchar* cl_screenshot = NULL;
 static gchar* cl_record = NULL;
 static gdouble cl_delay = 0.0;
-static gboolean cl_press_on = FALSE;
 static gboolean cl_fullspeed_flag = FALSE;
 static gboolean cl_normalspeed_flag = FALSE;
 static gboolean cl_reset_flag = FALSE;
 static gboolean cl_headless_flag = FALSE;
+static gchar* cl_macro = NULL;
 
 static GOptionEntry entries[] = {
 	{ "rom", 'r', 0, G_OPTION_ARG_FILENAME, &cl_romfile,
@@ -61,8 +60,8 @@ static GOptionEntry entries[] = {
 	  "Save a screenshot to FILE", "FILE" },
 	{ "headless-record", 0, 0, G_OPTION_ARG_FILENAME, &cl_record,
 	  "Save a GIF recording to FILE", "FILE" },
-	{ "press-on", 0, 0, G_OPTION_ARG_NONE, &cl_press_on,
-	  "Press the ON key at startup", NULL },
+	{ "macro", 0, 0, G_OPTION_ARG_FILENAME, &cl_macro,
+	  "Execute macro script FILE", "FILE" },
 	{ 0, 0, 0, 0, 0, 0, 0 }
 };
 
@@ -225,16 +224,6 @@ static TilemCalc *load_calc(const char *romname,
 	return calc;
 }
 
-static void press_on(TilemCalc *calc)
-{
-	int rem = 0;
-
-	tilem_keypad_press_key(calc, TILEM_KEY_ON);
-	tilem_z80_run_time(calc, 500000, &rem);
-	tilem_keypad_release_key(calc, TILEM_KEY_ON);
-	tilem_z80_run_time(calc, 500000, &rem);
-}
-
 static void run_for(TilemCalc *calc,
                     TilemLCDBuffer *lcd,
                     TilemAnimation *record,
@@ -280,6 +269,32 @@ static void run_for(TilemCalc *calc,
 	}
 }
 
+typedef struct {
+	TilemCalc *calc;
+	TilemLCDBuffer *lcd;
+	TilemAnimation *record;
+	gboolean limit_speed;
+} HeadlessContext;
+
+static void headless_press_key(void *data, int key)
+{
+	HeadlessContext *ctx = data;
+	tilem_keypad_press_key(ctx->calc, key);
+}
+
+static void headless_release_key(void *data, int key)
+{
+	HeadlessContext *ctx = data;
+	tilem_keypad_release_key(ctx->calc, key);
+}
+
+static void headless_advance_time(void *data, double seconds)
+{
+	HeadlessContext *ctx = data;
+	if (seconds > 0.0)
+		run_for(ctx->calc, ctx->lcd, ctx->record, seconds, ctx->limit_speed);
+}
+
 int main(int argc, char **argv)
 {
 	GOptionContext *context;
@@ -290,6 +305,10 @@ int main(int argc, char **argv)
 	int model = 0;
 	gboolean limit_speed = TRUE;
 	char *record_format = NULL;
+	TilemHeadlessOps ops;
+	TilemHeadlessScriptSettings script_settings;
+	GError *script_err = NULL;
+	HeadlessContext ctx;
 
 	context = g_option_context_new(NULL);
 	g_option_context_add_main_entries(context, entries, NULL);
@@ -342,15 +361,37 @@ int main(int argc, char **argv)
 
 	calc->linkport.linkemu = TILEM_LINK_EMULATOR_NONE;
 
-	if (cl_press_on)
-		press_on(calc);
-
 	lcd = tilem_lcd_buffer_new();
 	if (cl_record)
 		record_anim = tilem_animation_new(calc->hw.lcdwidth,
 		                                  calc->hw.lcdheight);
 
-	run_for(calc, lcd, record_anim, cl_delay, limit_speed);
+	ctx.calc = calc;
+	ctx.lcd = lcd;
+	ctx.record = record_anim;
+	ctx.limit_speed = limit_speed;
+
+	ops.ctx = &ctx;
+	ops.press_key = headless_press_key;
+	ops.release_key = headless_release_key;
+	ops.advance_time = headless_advance_time;
+
+	script_settings.key_hold = TILEM_HEADLESS_DEFAULT_KEY_HOLD;
+	script_settings.key_delay = TILEM_HEADLESS_DEFAULT_KEY_DELAY;
+
+	if (cl_macro) {
+		if (!tilem_headless_script_run(cl_macro, &ops,
+		                               &script_settings, &script_err)) {
+			g_printerr("Macro error: %s\n", script_err->message);
+			g_clear_error(&script_err);
+			tilem_lcd_buffer_free(lcd);
+			tilem_calc_free(calc);
+			return 1;
+		}
+	}
+	else if (cl_delay > 0.0) {
+		run_for(calc, lcd, record_anim, cl_delay, limit_speed);
+	}
 
 	tilem_lcd_get_frame(calc, lcd);
 

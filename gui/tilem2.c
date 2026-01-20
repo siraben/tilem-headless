@@ -29,12 +29,12 @@
 #include <glib.h>
 #include <ticalcs.h>
 #include <tilem.h>
-#include <scancodes.h>
 
 #include "gui.h"
 #include "files.h"
 #include "icons.h"
 #include "msgbox.h"
+#include "../headless/script.h"
 
 /* CMD LINE OPTIONS */
 static gchar* cl_romfile = NULL;
@@ -53,7 +53,7 @@ static gboolean cl_headless_flag = FALSE;
 static gchar* cl_headless_screenshot = NULL;
 static gchar* cl_headless_record = NULL;
 static gdouble cl_headless_delay = 0.0;
-static gboolean cl_headless_press_on = FALSE;
+static gchar* cl_headless_macro = NULL;
 
 
 static GOptionEntry entries[] =
@@ -73,7 +73,7 @@ static GOptionEntry entries[] =
 	{ "headless-delay", 0, 0, G_OPTION_ARG_DOUBLE, &cl_headless_delay, "Seconds to wait before capture/exit in headless mode", "SECONDS" },
 	{ "headless-screenshot", 0, 0, G_OPTION_ARG_FILENAME, &cl_headless_screenshot, "Save a screenshot to FILE in headless mode", "FILE" },
 	{ "headless-record", 0, 0, G_OPTION_ARG_FILENAME, &cl_headless_record, "Save a GIF recording to FILE in headless mode", "FILE" },
-	{ "press-on", 0, 0, G_OPTION_ARG_NONE, &cl_headless_press_on, "Press the ON key at startup (headless mode)", NULL },
+	{ "macro", 0, 0, G_OPTION_ARG_FILENAME, &cl_headless_macro, "Execute macro script FILE (headless mode)", "FILE" },
 	{ G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &cl_files_to_load, NULL, "FILE" },
 	{ 0, 0, 0, 0, 0, 0, 0 }
 };
@@ -239,6 +239,30 @@ static void load_initial_rom(TilemCalcEmulator *emu,
 	}
 }
 
+typedef struct {
+	TilemCalcEmulator *emu;
+} GuiHeadlessContext;
+
+static void gui_headless_press_key(void *data, int key)
+{
+	GuiHeadlessContext *ctx = data;
+	tilem_calc_emulator_press_key(ctx->emu, key);
+}
+
+static void gui_headless_release_key(void *data, int key)
+{
+	GuiHeadlessContext *ctx = data;
+	tilem_calc_emulator_release_key(ctx->emu, key);
+}
+
+static void gui_headless_advance_time(void *data, double seconds)
+{
+	GuiHeadlessContext *ctx = data;
+	(void) ctx;
+	if (seconds > 0.0)
+		g_usleep((gulong)(seconds * G_USEC_PER_SEC));
+}
+
 int main(int argc, char **argv)
 {
 	TilemCalcEmulator* emu;
@@ -250,6 +274,10 @@ int main(int argc, char **argv)
 	char *format = NULL;
 	TilemAnimation *anim = NULL;
 	int i;
+	GError *script_err = NULL;
+	GuiHeadlessContext headless_ctx;
+	TilemHeadlessOps headless_ops;
+	TilemHeadlessScriptSettings script_settings;
 
 	g_thread_init(NULL);
 	for (i = 1; i < argc; i++) {
@@ -299,6 +327,10 @@ int main(int argc, char **argv)
 
 	if (cl_headless_flag && cl_debug_flag) {
 		g_printerr("Headless mode does not support the debugger.\n");
+		return 1;
+	}
+	if (cl_headless_macro && !cl_headless_flag) {
+		g_printerr("--macro requires --headless.\n");
 		return 1;
 	}
 
@@ -361,14 +393,32 @@ int main(int argc, char **argv)
 			tilem_calc_emulator_begin_animation(emu, emu->grayscale);
 		}
 
-		if (cl_headless_press_on) {
-			tilem_calc_emulator_press_key(emu, TILEM_KEY_ON);
-			g_usleep(500000);
-			tilem_calc_emulator_release_key(emu, TILEM_KEY_ON);
-		}
+		headless_ctx.emu = emu;
+		headless_ops.ctx = &headless_ctx;
+		headless_ops.press_key = gui_headless_press_key;
+		headless_ops.release_key = gui_headless_release_key;
+		headless_ops.advance_time = gui_headless_advance_time;
+		script_settings.key_hold = TILEM_HEADLESS_DEFAULT_KEY_HOLD;
+		script_settings.key_delay = TILEM_HEADLESS_DEFAULT_KEY_DELAY;
 
-		if (cl_headless_delay > 0.0)
+		if (cl_headless_macro) {
+			if (!tilem_headless_script_run(cl_headless_macro,
+			                               &headless_ops,
+			                               &script_settings,
+			                               &script_err)) {
+				g_printerr("Macro error: %s\n", script_err->message);
+				g_clear_error(&script_err);
+				tilem_calc_emulator_pause(emu);
+				tilem_calc_emulator_free(emu);
+				ticables_library_exit();
+				tifiles_library_exit();
+				ticalcs_library_exit();
+				return 1;
+			}
+		}
+		else if (cl_headless_delay > 0.0) {
 			g_usleep((gulong)(cl_headless_delay * G_USEC_PER_SEC));
+		}
 
 		if (cl_headless_screenshot) {
 			anim = tilem_calc_emulator_get_screenshot(emu, emu->grayscale);

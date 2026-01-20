@@ -30,7 +30,7 @@ distfiles = CHANGELOG COPYING INSTALL KEYS NEWS README THANKS TODO \
 	db/Makefile.in db/*.c db/*.h \
 	emu/Makefile.in emu/*.c emu/*.h emu/x*/*.c emu/x*/*.h \
 	gui/Makefile.in gui/*.c gui/*.h gui/*.ico gui/*.rc.in \
-	headless/Makefile.in headless/*.c \
+	headless/Makefile.in headless/*.c headless/*.h \
 	installer/win32/Makefile.in \
 	installer/win32/installer.nsi.in installer/win32/gtkrc \
 	installer/win32/COPYING-ZLIB installer/win32/COPYING-PIXMAN

@@ -58,6 +58,7 @@ objects = tilem2.o \
 	files.o \
 	fixedtreeview.o \
 	gifencod.o \
+	headless_script.o \
 	icons.o \
 	keybindings.o \
 	keypaddlg.o \
@@ -79,7 +80,8 @@ objects = tilem2.o \
 
 libs = $(TILEMDB_LIBS) $(TILEMCORE_LIBS) $(GTK_LIBS) $(TICALCS_LIBS) $(LIBS)
 
-compile = $(CC) -I$(top_builddir) -I$(srcdir) $(CFLAGS) $(CPPFLAGS) $(DEFS) \
+compile = $(CC) -I$(top_builddir) -I$(srcdir) -I$(top_srcdir)/headless \
+	$(CFLAGS) $(CPPFLAGS) $(DEFS) \
 	$(TILEMCORE_CFLAGS) $(TILEMDB_CFLAGS) \
 	$(GTK_CFLAGS) $(TICALCS_CFLAGS)
 
@@ -218,6 +220,10 @@ sendfile.o: sendfile.c emucore.h $(common_headers)
 # File open/save dialogs
 filedlg.o: filedlg.c filedlg.h
 	$(compile) -c $(srcdir)/filedlg.c
+
+# Headless script parser (shared with headless build)
+headless_script.o: $(top_srcdir)/headless/script.c $(top_srcdir)/headless/script.h
+	$(compile) -c $(top_srcdir)/headless/script.c -o headless_script.o
 
 # Fixed-width tree view
 fixedtreeview.o: fixedtreeview.c fixedtreeview.h
