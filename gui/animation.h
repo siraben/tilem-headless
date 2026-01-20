@@ -17,7 +17,22 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <gtk/gtk.h>
+#include <stdio.h>
+
+#include <glib.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
+#include <tilem.h>
+
+#ifdef TILEM_NO_GTK
+typedef struct _GdkColor {
+	guint32 pixel;
+	guint16 red;
+	guint16 green;
+	guint16 blue;
+} GdkColor;
+#else
+#include <gdk/gdk.h>
+#endif
 
 G_BEGIN_DECLS
 
@@ -84,5 +99,9 @@ gboolean tilem_animation_save(TilemAnimation *anim,
                               const char *fname, const char *type,
                               char **option_keys, char **option_values,
                               GError **err);
+
+/* Save a TilemAnimation to a GIF file. */
+void tilem_animation_write_gif(TilemAnimation *anim, byte* palette,
+                               int palette_size, FILE *fp);
 
 G_END_DECLS

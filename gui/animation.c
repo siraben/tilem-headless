@@ -26,12 +26,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
-#include <gtk/gtk.h>
 #include <glib/gstdio.h>
-#include <ticalcs.h>
 #include <tilem.h>
 
-#include "gui.h"
+#include "animation.h"
 
 #define GAMMA 2.2
 

@@ -23,10 +23,10 @@
 #endif
 
 #include <stdio.h>
-#include <gtk/gtk.h>
-#include <ticalcs.h>
 #include <tilem.h>
-#include "gui.h"
+
+#include "animation.h"
+#include "gifencod.h"
 
 
 static void write_global_header(FILE* fp, int width, int height, byte* palette, int palette_size);

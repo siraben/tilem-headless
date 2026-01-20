@@ -320,12 +320,6 @@ void progress_bar_update(TilemCalcEmulator* emu);
 
 
 
-/* ##### animatedgif.c ##### */
-
-/* Save a TilemAnimation to a GIF file. */
-void tilem_animation_write_gif(TilemAnimation *anim, byte* palette, int palette_size, FILE *fp);
-
-
 /* ##### gifencod.c ##### */
 
 /* Encode gif data */
@@ -383,4 +377,3 @@ void tilem_receive_dialog_free(TilemReceiveDialog *rcvdlg);
    list.  Display the dialog if it's currently hidden. */
 void tilem_receive_dialog_update(TilemReceiveDialog *rcvdlg,
                                  GSList *varlist);
-

@@ -47,62 +47,85 @@ m4_define(with_flags, [
   LIBS="$save_libs"
 ])
 
+# GUI / headless selection
+
+AC_ARG_ENABLE([gui],
+  AS_HELP_STRING([--disable-gui], [Disable the GUI and build headless-only]),
+  [ enable_gui=$enableval ], [ enable_gui=yes ])
+
 # GLib and GTK+
 
-PKG_CHECK_MODULES(GTK, gtk+-2.0 >= 2.6.0
-                       glib-2.0 >= 2.12.0
-                       gthread-2.0)
+if test "x$enable_gui" != "xno" ; then
+  PKG_CHECK_MODULES(GTK, gtk+-2.0 >= 2.6.0
+                         glib-2.0 >= 2.12.0
+                         gthread-2.0)
 
-AC_ARG_ENABLE([gtk-deprecated],
-  AS_HELP_STRING([--disable-gtk-deprecated], [Disable deprecated GTK+ API]),
-  [ enable_gtk_deprecated=$enableval ], [ enable_gtk_deprecated=yes ])
-if test "x$enable_gtk_deprecated" = "xno" ; then
-  GTK_CFLAGS="$GTK_CFLAGS -DG_DISABLE_DEPRECATED -DGTK_DISABLE_DEPRECATED -DGDK_DISABLE_DEPRECATED -DGSEAL_ENABLE"
-fi
+  AC_ARG_ENABLE([gtk-deprecated],
+    AS_HELP_STRING([--disable-gtk-deprecated], [Disable deprecated GTK+ API]),
+    [ enable_gtk_deprecated=$enableval ], [ enable_gtk_deprecated=yes ])
+  if test "x$enable_gtk_deprecated" = "xno" ; then
+    GTK_CFLAGS="$GTK_CFLAGS -DG_DISABLE_DEPRECATED -DGTK_DISABLE_DEPRECATED -DGDK_DISABLE_DEPRECATED -DGSEAL_ENABLE"
+  fi
 
-# If using the native Windows version of GTK+, be sure to use
-# -mms-bitfields for all compilation.  Also, use -mwindows for linking
-# GUI programs.
+  # If using the native Windows version of GTK+, be sure to use
+  # -mms-bitfields for all compilation.  Also, use -mwindows for linking
+  # GUI programs.
 
-# (If not using pkg-config, you're on your own)
+  # (If not using pkg-config, you're on your own)
 
-if test "x$PKG_CONFIG" != "x" ; then
-  gtk_target=`$PKG_CONFIG --variable=target gtk+-2.0`
-fi
+  if test "x$PKG_CONFIG" != "x" ; then
+    gtk_target=`$PKG_CONFIG --variable=target gtk+-2.0`
+  fi
 
-if test "x$gtk_target" = "xwin32" && test "x$GCC" = "xyes" ; then
-  CFLAGS="$CFLAGS -mms-bitfields"
-  GUI_LDFLAGS="-mwindows"
-  LIBS="-lcomdlg32 -lshell32 -lole32 $LIBS"
-  gui_extra_objects="tilem2rc.o"
+  if test "x$gtk_target" = "xwin32" && test "x$GCC" = "xyes" ; then
+    CFLAGS="$CFLAGS -mms-bitfields"
+    GUI_LDFLAGS="-mwindows"
+    LIBS="-lcomdlg32 -lshell32 -lole32 $LIBS"
+    gui_extra_objects="tilem2rc.o"
+  else
+    GUI_LDFLAGS=""
+    gui_extra_objects=""
+  fi
+
+  with_flags(GTK,
+    [ AC_CHECK_FUNC(gtk_init, [ have_gtk=yes ], [ have_gtk=no ]) ])
+  if test "x$have_gtk" != "xyes" ; then
+    AC_MSG_ERROR([GTK+ 2.x libraries not found or not usable.
+You must install a recent version of GTK+ 2.x, including the
+-dev/-devel packages if appropriate.])
+  fi
+
+  BUILD_GUI=yes
+  BUILD_HEADLESS=no
 else
+  BUILD_GUI=no
+  BUILD_HEADLESS=yes
+  GTK_CFLAGS=""
+  GTK_LIBS=""
   GUI_LDFLAGS=""
   gui_extra_objects=""
 fi
 
+AC_SUBST(GTK_CFLAGS)
+AC_SUBST(GTK_LIBS)
 AC_SUBST(GUI_LDFLAGS)
 AC_SUBST(gui_extra_objects)
+AC_SUBST(BUILD_GUI)
+AC_SUBST(BUILD_HEADLESS)
 
-with_flags(GTK,
-  [ AC_CHECK_FUNC(gtk_init, [ have_gtk=yes ], [ have_gtk=no ]) ])
-if test "x$have_gtk" != "xyes" ; then
-  AC_MSG_ERROR([GTK+ 2.x libraries not found or not usable.
-You must install a recent version of GTK+ 2.x, including the
--dev/-devel packages if appropriate.])
-fi
+# Libticalcs2 and related libraries (GUI only)
 
-# Libticalcs2 and related libraries
+if test "x$enable_gui" != "xno" ; then
+  PKG_CHECK_MODULES(TICALCS, ticalcs2 ticables2 tifiles2 ticonv,
+                    [ have_ticalcs=maybe ], [ have_ticalcs=no ])
 
-PKG_CHECK_MODULES(TICALCS, ticalcs2 ticables2 tifiles2 ticonv,
-                  [ have_ticalcs=maybe ], [ have_ticalcs=no ])
+  if test "x$have_ticalcs" = "xmaybe" ; then
+    with_flags(TICALCS,
+      [ AC_CHECK_FUNC(ticalcs_library_init, [ have_ticalcs=yes ], [ have_ticalcs=no ]) ])
+  fi
 
-if test "x$have_ticalcs" = "xmaybe" ; then
-  with_flags(TICALCS,
-    [ AC_CHECK_FUNC(ticalcs_library_init, [ have_ticalcs=yes ], [ have_ticalcs=no ]) ])
-fi
-
-if test "x$have_ticalcs" != "xyes" ; then
-  AC_MSG_ERROR([libticalcs2 not found or not usable.
+  if test "x$have_ticalcs" != "xyes" ; then
+    AC_MSG_ERROR([libticalcs2 not found or not usable.
 
 $TICALCS_PKG_ERRORS
 
@@ -114,7 +137,28 @@ If you have installed the libraries in a non-standard location (or if
 you're cross-compiling), you will need to add the location of
 ticalcs2.pc to your PKG_CONFIG_PATH environment variable, or set the
 TICALCS_CFLAGS and TICALCS_LIBS environment variables by hand.])
+  fi
+else
+  TICALCS_CFLAGS=""
+  TICALCS_LIBS=""
 fi
+
+AC_SUBST(TICALCS_CFLAGS)
+AC_SUBST(TICALCS_LIBS)
+
+# Headless dependencies
+
+if test "x$enable_gui" = "xno" ; then
+  PKG_CHECK_MODULES(HEADLESS, gdk-pixbuf-2.0 >= 2.0.0
+                             glib-2.0 >= 2.12.0
+                             gthread-2.0)
+else
+  HEADLESS_CFLAGS=""
+  HEADLESS_LIBS=""
+fi
+
+AC_SUBST(HEADLESS_CFLAGS)
+AC_SUBST(HEADLESS_LIBS)
 
 # Tools used for building the Windows installer
 
@@ -166,6 +210,7 @@ AC_CONFIG_FILES([Makefile
                  db/Makefile
                  data/Makefile
                  gui/Makefile
+                 headless/Makefile
                  gui/tilem2.rc
                  installer/win32/Makefile
                  installer/win32/installer.nsi])

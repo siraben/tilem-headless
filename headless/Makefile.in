@@ -1,0 +1,76 @@
+prefix = @prefix@
+exec_prefix = @exec_prefix@
+datarootdir = @datarootdir@
+bindir = @bindir@
+mandir = @mandir@
+
+top_builddir = @top_builddir@
+top_srcdir = @top_srcdir@
+srcdir = @srcdir@
+VPATH = @srcdir@
+@SET_MAKE@
+
+CC = @CC@
+CFLAGS = @CFLAGS@
+CPPFLAGS = @CPPFLAGS@
+DEFS = @DEFS@
+INSTALL = @INSTALL@
+INSTALL_PROGRAM = @INSTALL_PROGRAM@
+LDFLAGS = @LDFLAGS@
+LIBS = @LIBS@
+SHELL = @SHELL@
+
+HEADLESS_CFLAGS = @HEADLESS_CFLAGS@
+HEADLESS_LIBS = @HEADLESS_LIBS@
+
+TILEMCORE_CFLAGS = -I$(top_srcdir)/emu
+TILEMCORE_LIBS = -L$(top_builddir)/emu -ltilemcore
+
+ANIM_HEADERS = $(top_srcdir)/gui/animation.h $(top_srcdir)/gui/gifencod.h
+
+objects = tilem2-headless.o \
+	animation.o \
+	animatedgif.o \
+	gifencod.o
+
+compile = $(CC) -I$(top_builddir) -I$(top_srcdir)/gui $(CFLAGS) $(CPPFLAGS) $(DEFS) \
+	$(TILEMCORE_CFLAGS) $(HEADLESS_CFLAGS) -DTILEM_NO_GTK
+
+link = $(CC) $(CFLAGS) $(LDFLAGS)
+
+all: tilem2@EXEEXT@
+
+tilem2@EXEEXT@: $(objects) ../emu/libtilemcore.a
+	$(link) -o tilem2@EXEEXT@ $(objects) $(TILEMCORE_LIBS) $(HEADLESS_LIBS) $(LIBS)
+
+tilem2-headless.o: tilem2-headless.c $(ANIM_HEADERS)
+	$(compile) -c $(srcdir)/tilem2-headless.c
+
+animation.o: $(top_srcdir)/gui/animation.c $(ANIM_HEADERS)
+	$(compile) -c $(top_srcdir)/gui/animation.c
+
+animatedgif.o: $(top_srcdir)/gui/animatedgif.c $(ANIM_HEADERS)
+	$(compile) -c $(top_srcdir)/gui/animatedgif.c
+
+gifencod.o: $(top_srcdir)/gui/gifencod.c $(top_srcdir)/gui/gifencod.h
+	$(compile) -c $(top_srcdir)/gui/gifencod.c
+
+install: tilem2@EXEEXT@
+	$(INSTALL) -d -m 755 $(DESTDIR)$(bindir)
+	$(INSTALL_PROGRAM) -m 755 tilem2@EXEEXT@ $(DESTDIR)$(bindir)
+
+uninstall:
+	rm -f $(DESTDIR)$(bindir)/tilem2@EXEEXT@
+
+clean:
+	rm -f *.o
+	rm -f tilem2@EXEEXT@
+
+Makefile: Makefile.in $(top_builddir)/config.status
+	cd $(top_builddir) && $(SHELL) ./config.status
+
+$(top_builddir)/config.status: $(top_srcdir)/configure
+	cd $(top_builddir) && $(SHELL) ./config.status --recheck
+
+.PRECIOUS: Makefile $(top_builddir)/config.status
+.PHONY: all clean install uninstall

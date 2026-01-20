@@ -95,15 +95,11 @@
 #define WORD short int
 #define UWORD unsigned short int
 
-int chainlen = 0, maxchainlen = 0, nodecount = 0, lookuptypes = 0, nbits;
+extern int chainlen, maxchainlen, nodecount, lookuptypes, nbits;
+extern short need;
 
-short need = 8;
-
-
-
-
-unsigned int debugFlag, verbose;
-int count;
+extern unsigned int debugFlag, verbose;
+extern int count;
 
 /* definition of various structures */
 typedef struct Transparency {
@@ -169,8 +165,7 @@ typedef struct GifTree {
   struct GifTree **node, *nxt, *alt;
 } GifTree;
 
-GifTree *empty[256], GifRoot = {LOOKUP, 0, 0, empty, NULL, NULL},
-*topNode, *baseNode, **nodeArray, **lastArray;
+extern GifTree *empty[256], GifRoot, *topNode, *baseNode, **nodeArray, **lastArray;
 
 /* define inline functions */
 #define GifPutShort(i, fout)    {fputc(i&0xff, fout); fputc(i>>8, fout);}

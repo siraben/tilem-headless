@@ -24,10 +24,12 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <gtk/gtk.h>
 #include <glib.h>
 #include <ticalcs.h>
 #include <tilem.h>
+#include <scancodes.h>
 
 #include "gui.h"
 #include "files.h"
@@ -47,6 +49,11 @@ static gchar* cl_macro_to_run = NULL;
 static gboolean cl_debug_flag = FALSE;
 static gboolean cl_normalspeed_flag = FALSE;
 static gboolean cl_fullspeed_flag = FALSE;
+static gboolean cl_headless_flag = FALSE;
+static gchar* cl_headless_screenshot = NULL;
+static gchar* cl_headless_record = NULL;
+static gdouble cl_headless_delay = 0.0;
+static gboolean cl_headless_press_on = FALSE;
 
 
 static GOptionEntry entries[] =
@@ -62,6 +69,11 @@ static GOptionEntry entries[] =
 	{ "debug", 'd', 0, G_OPTION_ARG_NONE, &cl_debug_flag, "Launch debugger", NULL },
 	{ "normal-speed", 0, 0, G_OPTION_ARG_NONE, &cl_normalspeed_flag, "Run at normal speed", NULL },
 	{ "full-speed", 0, 0, G_OPTION_ARG_NONE, &cl_fullspeed_flag, "Run at maximum speed", NULL },
+	{ "headless", 0, 0, G_OPTION_ARG_NONE, &cl_headless_flag, "Run without the GUI", NULL },
+	{ "headless-delay", 0, 0, G_OPTION_ARG_DOUBLE, &cl_headless_delay, "Seconds to wait before capture/exit in headless mode", "SECONDS" },
+	{ "headless-screenshot", 0, 0, G_OPTION_ARG_FILENAME, &cl_headless_screenshot, "Save a screenshot to FILE in headless mode", "FILE" },
+	{ "headless-record", 0, 0, G_OPTION_ARG_FILENAME, &cl_headless_record, "Save a GIF recording to FILE in headless mode", "FILE" },
+	{ "press-on", 0, 0, G_OPTION_ARG_NONE, &cl_headless_press_on, "Press the ON key at startup (headless mode)", NULL },
 	{ G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &cl_files_to_load, NULL, "FILE" },
 	{ 0, 0, 0, 0, 0, 0, 0 }
 };
@@ -114,7 +126,8 @@ static void load_initial_rom(TilemCalcEmulator *emu,
                              const char *cmdline_rom_name,
                              const char *cmdline_state_name,
                              char **cmdline_files,
-                             int model)
+                             int model,
+                             gboolean allow_prompt)
 {
 	GError *err = NULL;
 	char *modelname;
@@ -165,9 +178,15 @@ static void load_initial_rom(TilemCalcEmulator *emu,
 				exit(0);
 			else if (!g_error_matches(err, TILEM_EMULATOR_ERROR,
 			                          TILEM_EMULATOR_ERROR_NO_ROM)) {
-				messagebox01(NULL, GTK_MESSAGE_ERROR,
-				             "Unable to load calculator state",
-				             "%s", err->message);
+				if (allow_prompt) {
+					messagebox01(NULL, GTK_MESSAGE_ERROR,
+					             "Unable to load calculator state",
+					             "%s", err->message);
+				}
+				else {
+					g_printerr("Unable to load calculator state: %s\n",
+					           err->message);
+				}
 			}
 			g_clear_error(&err);
 		}
@@ -194,14 +213,25 @@ static void load_initial_rom(TilemCalcEmulator *emu,
 		else if (!err)
 			exit(0);
 		else {
-			messagebox01(NULL, GTK_MESSAGE_ERROR,
-			             "Unable to load calculator state",
-			             "%s", err->message);
+			if (allow_prompt) {
+				messagebox01(NULL, GTK_MESSAGE_ERROR,
+				             "Unable to load calculator state",
+				             "%s", err->message);
+			}
+			else {
+				g_printerr("Unable to load calculator state: %s\n",
+				           err->message);
+			}
 			g_clear_error(&err);
 		}
 	}
 
 	/* Prompt user for a ROM file */
+
+	if (!allow_prompt) {
+		g_printerr("No ROM file specified; use --rom or --model.\n");
+		exit(1);
+	}
 
 	while (!emu->calc) {
 		if (!tilem_calc_emulator_prompt_open_rom(emu))
@@ -216,25 +246,42 @@ int main(int argc, char **argv)
 	GOptionContext *context;
 	GError *error = NULL;
 	int model = 0;
+	gboolean use_headless = FALSE;
+	char *format = NULL;
+	TilemAnimation *anim = NULL;
+	int i;
 
 	g_thread_init(NULL);
-	gtk_init(&argc, &argv);
+	for (i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "--headless")
+		    || g_str_has_prefix(argv[i], "--headless=")) {
+			use_headless = TRUE;
+			break;
+		}
+	}
+
 	set_program_path(argv[0]);
 	g_set_application_name("TilEm");
 
-	menurc_path = get_shared_file_path("menurc", NULL);
-	if (menurc_path)
-		gtk_accel_map_load(menurc_path);
-	g_free(menurc_path);
+	if (!use_headless)
+		gtk_init(&argc, &argv);
 
-	init_custom_icons();
-	gtk_window_set_default_icon_name("tilem");
+	if (!use_headless) {
+		menurc_path = get_shared_file_path("menurc", NULL);
+		if (menurc_path)
+			gtk_accel_map_load(menurc_path);
+		g_free(menurc_path);
+
+		init_custom_icons();
+		gtk_window_set_default_icon_name("tilem");
+	}
 
 	emu = tilem_calc_emulator_new();
 
 	context = g_option_context_new(NULL);
 	g_option_context_add_main_entries(context, entries, NULL);
-	g_option_context_add_group(context, gtk_get_option_group(TRUE));
+	if (!use_headless)
+		g_option_context_add_group(context, gtk_get_option_group(FALSE));
 	if (!g_option_context_parse(context, &argc, &argv, &error))
 	{
 		g_printerr("%s: %s\n", g_get_prgname(), error->message);
@@ -250,18 +297,27 @@ int main(int argc, char **argv)
 		}
 	}
 
-	load_initial_rom(emu, cl_romfile, cl_statefile, cl_files_to_load, model);
-
-	emu->ewin = tilem_emulator_window_new(emu);
-
-	if (cl_skinless_flag)
-		tilem_emulator_window_set_skin_disabled(emu->ewin, TRUE);
-	else if (cl_skinfile) {
-		tilem_emulator_window_set_skin(emu->ewin, cl_skinfile);
-		tilem_emulator_window_set_skin_disabled(emu->ewin, FALSE);
+	if (cl_headless_flag && cl_debug_flag) {
+		g_printerr("Headless mode does not support the debugger.\n");
+		return 1;
 	}
 
-	gtk_widget_show(emu->ewin->window);
+	load_initial_rom(emu, cl_romfile, cl_statefile, cl_files_to_load, model,
+	                 !cl_headless_flag);
+
+	if (!cl_headless_flag)
+		emu->ewin = tilem_emulator_window_new(emu);
+
+	if (!cl_headless_flag) {
+		if (cl_skinless_flag)
+			tilem_emulator_window_set_skin_disabled(emu->ewin, TRUE);
+		else if (cl_skinfile) {
+			tilem_emulator_window_set_skin(emu->ewin, cl_skinfile);
+			tilem_emulator_window_set_skin_disabled(emu->ewin, FALSE);
+		}
+
+		gtk_widget_show(emu->ewin->window);
+	}
 
 	ticables_library_init();
 	tifiles_library_init();
@@ -272,20 +328,84 @@ int main(int argc, char **argv)
 
 	if (cl_fullspeed_flag)
 		tilem_calc_emulator_set_limit_speed(emu, FALSE);
-	else if (cl_normalspeed_flag)
+	else if (cl_normalspeed_flag || cl_headless_flag)
 		tilem_calc_emulator_set_limit_speed(emu, TRUE);
 
-	if (cl_files_to_load)
-		load_files_cmdline(emu->ewin, cl_files_to_load);
-	if (cl_macro_to_run)
-		tilem_macro_load(emu, cl_macro_to_run);
-	if (cl_getvar)
-		tilem_link_receive_matching(emu, cl_getvar, ".");
+	if (!cl_headless_flag) {
+		if (cl_files_to_load)
+			load_files_cmdline(emu->ewin, cl_files_to_load);
+		if (cl_macro_to_run)
+			tilem_macro_load(emu, cl_macro_to_run);
+		if (cl_getvar)
+			tilem_link_receive_matching(emu, cl_getvar, ".");
+	}
 
 	if (cl_debug_flag)
 		launch_debugger(emu->ewin);
 	else
 		tilem_calc_emulator_run(emu);
+
+	if (cl_headless_flag) {
+		if (cl_headless_record) {
+			format = g_ascii_strdown(strrchr(cl_headless_record, '.')
+			                         ? strrchr(cl_headless_record, '.') + 1
+			                         : "gif",
+			                         -1);
+			if (strcmp(format, "gif") != 0) {
+				g_printerr("Headless recording requires a .gif output.\n");
+				g_free(format);
+				tilem_calc_emulator_free(emu);
+				return 1;
+			}
+			g_free(format);
+			tilem_calc_emulator_begin_animation(emu, emu->grayscale);
+		}
+
+		if (cl_headless_press_on) {
+			tilem_calc_emulator_press_key(emu, TILEM_KEY_ON);
+			g_usleep(500000);
+			tilem_calc_emulator_release_key(emu, TILEM_KEY_ON);
+		}
+
+		if (cl_headless_delay > 0.0)
+			g_usleep((gulong)(cl_headless_delay * G_USEC_PER_SEC));
+
+		if (cl_headless_screenshot) {
+			anim = tilem_calc_emulator_get_screenshot(emu, emu->grayscale);
+			if (anim) {
+				format = g_ascii_strdown(strrchr(cl_headless_screenshot, '.')
+				                         ? strrchr(cl_headless_screenshot, '.') + 1
+				                         : "png",
+				                         -1);
+				if (!tilem_animation_save(anim, cl_headless_screenshot, format,
+				                          NULL, NULL, &error)) {
+					g_printerr("Failed to save screenshot: %s\n", error->message);
+					g_clear_error(&error);
+				}
+				g_free(format);
+				g_object_unref(anim);
+			}
+		}
+
+		if (cl_headless_record) {
+			anim = tilem_calc_emulator_end_animation(emu);
+			if (anim) {
+				if (!tilem_animation_save(anim, cl_headless_record, "gif",
+				                          NULL, NULL, &error)) {
+					g_printerr("Failed to save recording: %s\n", error->message);
+					g_clear_error(&error);
+				}
+				g_object_unref(anim);
+			}
+		}
+
+		tilem_calc_emulator_pause(emu);
+		tilem_calc_emulator_free(emu);
+		ticables_library_exit();
+		tifiles_library_exit();
+		ticalcs_library_exit();
+		return 0;
+	}
 
 	g_signal_connect(emu->ewin->window, "destroy",
 	                 G_CALLBACK(gtk_main_quit), NULL);

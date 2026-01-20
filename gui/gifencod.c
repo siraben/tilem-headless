@@ -82,8 +82,8 @@ typedef struct GifTree {
 char *AddCodeToBuffer(int, short, char *);
 void ClearTree(int, GifTree *);
 
-extern unsigned int debugFlag;
-extern int count;
+unsigned int debugFlag, verbose;
+int count;
 
 int chainlen = 0, maxchainlen = 0, nodecount = 0, lookuptypes = 0, nbits;
 short need = 8;
