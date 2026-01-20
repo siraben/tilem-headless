@@ -36,6 +36,7 @@ typedef uint64_t qword;
 /* Structure types */
 typedef struct _TilemHardware TilemHardware;
 typedef struct _TilemCalc TilemCalc;
+typedef struct _TilemTrace TilemTrace;
 
 /* Useful macros */
 #if __GNUC__ >= 3
@@ -95,6 +96,14 @@ void tilem_warning(TilemCalc* calc, const char* msg, ...)
    never occur and indicate a bug in TilEm. */
 void tilem_internal(TilemCalc* calc, const char* msg, ...)
 	TILEM_ATTR_PRINTF(2, 3);
+
+/* Instruction/memory tracing (optional) */
+struct _TilemTrace {
+	void *ctx;
+	void (*instr)(TilemCalc* calc, void *ctx, dword pc, dword opcode);
+	void (*mem_write)(TilemCalc* calc, void *ctx, dword addr, byte value);
+	void (*key_event)(TilemCalc* calc, void *ctx, int key, int pressed);
+};
 
 
 /* Z80 CPU */
@@ -777,6 +786,7 @@ struct _TilemCalc {
 	TilemHardware hw;
 
 	TilemZ80 z80;
+	TilemTrace *trace;
 	byte* mem;
 	byte* ram;
 	byte* lcdmem;

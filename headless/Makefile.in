@@ -32,7 +32,8 @@ objects = tilem2-headless.o \
 	animation.o \
 	animatedgif.o \
 	gifencod.o \
-	script.o
+	script.o \
+	trace.o
 
 compile = $(CC) -I$(top_builddir) -I$(top_srcdir)/gui $(CFLAGS) $(CPPFLAGS) $(DEFS) \
 	$(TILEMCORE_CFLAGS) $(HEADLESS_CFLAGS) -DTILEM_NO_GTK
@@ -58,6 +59,9 @@ gifencod.o: $(top_srcdir)/gui/gifencod.c $(top_srcdir)/gui/gifencod.h
 
 script.o: script.c script.h
 	$(compile) -c $(srcdir)/script.c
+
+trace.o: trace.c trace.h
+	$(compile) -c $(srcdir)/trace.c
 
 install: tilem2@EXEEXT@
 	$(INSTALL) -d -m 755 $(DESTDIR)$(bindir)

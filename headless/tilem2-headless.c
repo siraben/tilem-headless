@@ -23,9 +23,11 @@
 #include <tilem.h>
 #include "animation.h"
 #include "script.h"
+#include "trace.h"
 
 #define FRAME_MSEC 30
 #define FRAME_USEC (FRAME_MSEC * 1000)
+#define TRACE_DEFAULT_LIMIT_BYTES (500ULL * 1024ULL * 1024ULL * 1024ULL)
 
 static gchar* cl_romfile = NULL;
 static gchar* cl_statefile = NULL;
@@ -38,6 +40,9 @@ static gboolean cl_normalspeed_flag = FALSE;
 static gboolean cl_reset_flag = FALSE;
 static gboolean cl_headless_flag = FALSE;
 static gchar* cl_macro = NULL;
+static gchar* cl_trace = NULL;
+static gchar* cl_trace_range = NULL;
+static gint64 cl_trace_limit = 0;
 
 static GOptionEntry entries[] = {
 	{ "rom", 'r', 0, G_OPTION_ARG_FILENAME, &cl_romfile,
@@ -62,6 +67,12 @@ static GOptionEntry entries[] = {
 	  "Save a GIF recording to FILE", "FILE" },
 	{ "macro", 0, 0, G_OPTION_ARG_FILENAME, &cl_macro,
 	  "Execute macro script FILE", "FILE" },
+	{ "trace", 0, 0, G_OPTION_ARG_FILENAME, &cl_trace,
+	  "Write binary instruction trace to FILE", "FILE" },
+	{ "trace-range", 0, 0, G_OPTION_ARG_STRING, &cl_trace_range,
+	  "Trace logical address range (e.g. ram, all, 0x8000-0xBFFF)", "RANGE" },
+	{ "trace-limit", 0, 0, G_OPTION_ARG_INT64, &cl_trace_limit,
+	  "Maximum trace size in bytes (default 500GB)", "BYTES" },
 	{ 0, 0, 0, 0, 0, 0, 0 }
 };
 
@@ -339,6 +350,7 @@ typedef struct {
 	TilemLCDBuffer *lcd;
 	TilemAnimation *record;
 	gboolean limit_speed;
+	TilemTraceWriter *trace;
 } HeadlessContext;
 
 static void headless_press_key(void *data, int key)
@@ -373,7 +385,9 @@ int main(int argc, char **argv)
 	TilemHeadlessOps ops;
 	TilemHeadlessScriptSettings script_settings;
 	GError *script_err = NULL;
+	GError *trace_err = NULL;
 	HeadlessContext ctx;
+	TilemTraceWriter trace_writer;
 
 	context = g_option_context_new(NULL);
 	g_option_context_add_main_entries(context, entries, NULL);
@@ -435,6 +449,7 @@ int main(int argc, char **argv)
 	ctx.lcd = lcd;
 	ctx.record = record_anim;
 	ctx.limit_speed = limit_speed;
+	ctx.trace = NULL;
 
 	ops.ctx = &ctx;
 	ops.press_key = headless_press_key;
@@ -446,11 +461,32 @@ int main(int argc, char **argv)
 	script_settings.key_hold = TILEM_HEADLESS_DEFAULT_KEY_HOLD;
 	script_settings.key_delay = TILEM_HEADLESS_DEFAULT_KEY_DELAY;
 
+	if (cl_trace) {
+		guint64 limit = (cl_trace_limit > 0)
+			? (guint64) cl_trace_limit
+			: TRACE_DEFAULT_LIMIT_BYTES;
+
+		if (!tilem_trace_writer_init(&trace_writer, calc, cl_trace,
+		                             cl_trace_range, limit,
+		                             &trace_err)) {
+			g_printerr("Trace error: %s\n", trace_err->message);
+			g_clear_error(&trace_err);
+			tilem_lcd_buffer_free(lcd);
+			tilem_calc_free(calc);
+			return 1;
+		}
+
+		ctx.trace = &trace_writer;
+	}
+
 	if (cl_macro) {
 		if (!tilem_headless_script_run(cl_macro, &ops,
 		                               &script_settings, &script_err)) {
 			g_printerr("Macro error: %s\n", script_err->message);
 			g_clear_error(&script_err);
+			if (ctx.trace) {
+				tilem_trace_writer_close(ctx.trace);
+			}
 			tilem_lcd_buffer_free(lcd);
 			tilem_calc_free(calc);
 			return 1;
@@ -473,6 +509,10 @@ int main(int argc, char **argv)
 	if (record_anim) {
 		save_animation(record_anim, cl_record, "gif");
 		g_object_unref(record_anim);
+	}
+
+	if (ctx.trace) {
+		tilem_trace_writer_close(ctx.trace);
 	}
 
 	tilem_lcd_buffer_free(lcd);

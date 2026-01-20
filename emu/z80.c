@@ -772,6 +772,8 @@ static inline void z80_writeb(TilemCalc* calc, dword addr, byte value)
 {
 	addr &= 0xffff;
 	(*calc->hw.z80_wrmem)(calc, addr, value);
+	if (calc->trace && calc->trace->mem_write)
+		calc->trace->mem_write(calc, calc->trace->ctx, addr, value);
 	check_mem_breakpoints(calc, calc->z80.breakpoint_mw,
 			      calc->z80.breakpoint_mpw, addr);
 	calc->z80.lastwrite = calc->z80.clock;
@@ -781,11 +783,15 @@ static inline void z80_writew(TilemCalc* calc, dword addr, word value)
 {
 	addr &= 0xffff;
 	(*calc->hw.z80_wrmem)(calc, addr, value);
+	if (calc->trace && calc->trace->mem_write)
+		calc->trace->mem_write(calc, calc->trace->ctx, addr, value);
 	check_mem_breakpoints(calc, calc->z80.breakpoint_mw,
 			      calc->z80.breakpoint_mpw, addr);
 	addr = (addr + 1) & 0xffff;
 	value >>= 8;
 	(*calc->hw.z80_wrmem)(calc, addr, value);
+	if (calc->trace && calc->trace->mem_write)
+		calc->trace->mem_write(calc, calc->trace->ctx, addr, value);
 	check_mem_breakpoints(calc, calc->z80.breakpoint_mw,
 			      calc->z80.breakpoint_mpw, addr);
 	calc->z80.lastwrite = calc->z80.clock;
@@ -867,11 +873,15 @@ static void z80_execute(TilemCalc* calc)
 	}
 
 	while (!z80->stopping) {
+		dword instr_pc = PC;
+
 		z80->exception = 0;
 		op = (*calc->hw.z80_rdmem_m1)(calc, PC);
 		PC++;
 		Rl++;
 		op = z80_execute_opcode(calc, op);
+		if (calc->trace && calc->trace->instr)
+			calc->trace->instr(calc, calc->trace->ctx, instr_pc, op);
 		check_breakpoints(calc, z80->breakpoint_op, op);
 		check_timers(calc);
 

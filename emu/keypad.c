@@ -66,6 +66,8 @@ byte tilem_keypad_read_keys(TilemCalc* calc)
 
 void tilem_keypad_press_key(TilemCalc* calc, int scancode)
 {
+	int raw_scancode = scancode;
+
 	if (scancode == TILEM_KEY_ON) {
 		if (!calc->keypad.onkeydown && calc->keypad.onkeyint)
 			calc->z80.interrupts |= TILEM_INTERRUPT_ON_KEY;
@@ -75,10 +77,15 @@ void tilem_keypad_press_key(TilemCalc* calc, int scancode)
 		scancode--;
 		calc->keypad.keysdown[scancode / 8] |= (1 << (scancode % 8));
 	}
+
+	if (calc->trace && calc->trace->key_event)
+		calc->trace->key_event(calc, calc->trace->ctx, raw_scancode, 1);
 }
 
 void tilem_keypad_release_key(TilemCalc* calc, int scancode)
 {
+	int raw_scancode = scancode;
+
 	if (scancode == TILEM_KEY_ON) {
 		if (calc->keypad.onkeydown && calc->keypad.onkeyint)
 			calc->z80.interrupts |= TILEM_INTERRUPT_ON_KEY;
@@ -88,4 +95,7 @@ void tilem_keypad_release_key(TilemCalc* calc, int scancode)
 		scancode--;
 		calc->keypad.keysdown[scancode / 8] &= ~(1 << (scancode % 8));
 	}
+
+	if (calc->trace && calc->trace->key_event)
+		calc->trace->key_event(calc, calc->trace->ctx, raw_scancode, 0);
 }

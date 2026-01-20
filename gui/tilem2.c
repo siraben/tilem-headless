@@ -35,6 +35,9 @@
 #include "icons.h"
 #include "msgbox.h"
 #include "../headless/script.h"
+#include "trace.h"
+
+#define TRACE_DEFAULT_LIMIT_BYTES (500ULL * 1024ULL * 1024ULL * 1024ULL)
 
 /* CMD LINE OPTIONS */
 static gchar* cl_romfile = NULL;
@@ -54,6 +57,9 @@ static gchar* cl_headless_screenshot = NULL;
 static gchar* cl_headless_record = NULL;
 static gdouble cl_headless_delay = 0.0;
 static gchar* cl_headless_macro = NULL;
+static gchar* cl_headless_trace = NULL;
+static gchar* cl_headless_trace_range = NULL;
+static gint64 cl_headless_trace_limit = 0;
 
 
 static GOptionEntry entries[] =
@@ -73,6 +79,9 @@ static GOptionEntry entries[] =
 	{ "headless-delay", 0, 0, G_OPTION_ARG_DOUBLE, &cl_headless_delay, "Seconds to wait before capture/exit in headless mode", "SECONDS" },
 	{ "headless-screenshot", 0, 0, G_OPTION_ARG_FILENAME, &cl_headless_screenshot, "Save a screenshot to FILE in headless mode", "FILE" },
 	{ "headless-record", 0, 0, G_OPTION_ARG_FILENAME, &cl_headless_record, "Save a GIF recording to FILE in headless mode", "FILE" },
+	{ "trace", 0, 0, G_OPTION_ARG_FILENAME, &cl_headless_trace, "Write binary instruction trace to FILE (headless mode)", "FILE" },
+	{ "trace-range", 0, 0, G_OPTION_ARG_STRING, &cl_headless_trace_range, "Trace logical address range (e.g. ram, all, 0x8000-0xBFFF)", "RANGE" },
+	{ "trace-limit", 0, 0, G_OPTION_ARG_INT64, &cl_headless_trace_limit, "Maximum trace size in bytes (default 500GB)", "BYTES" },
 	{ "macro", 0, 0, G_OPTION_ARG_FILENAME, &cl_headless_macro, "Execute macro script FILE (headless mode)", "FILE" },
 	{ G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &cl_files_to_load, NULL, "FILE" },
 	{ 0, 0, 0, 0, 0, 0, 0 }
@@ -355,6 +364,9 @@ int main(int argc, char **argv)
 	GuiHeadlessContext headless_ctx;
 	TilemHeadlessOps headless_ops;
 	TilemHeadlessScriptSettings script_settings;
+	TilemTraceWriter trace_writer;
+	gboolean trace_enabled = FALSE;
+	GError *trace_err = NULL;
 
 	g_thread_init(NULL);
 	for (i = 1; i < argc; i++) {
@@ -408,6 +420,10 @@ int main(int argc, char **argv)
 	}
 	if (cl_headless_macro && !cl_headless_flag) {
 		g_printerr("--macro requires --headless.\n");
+		return 1;
+	}
+	if (cl_headless_trace && !cl_headless_flag) {
+		g_printerr("--trace requires --headless.\n");
 		return 1;
 	}
 
@@ -480,6 +496,30 @@ int main(int argc, char **argv)
 		script_settings.key_hold = TILEM_HEADLESS_DEFAULT_KEY_HOLD;
 		script_settings.key_delay = TILEM_HEADLESS_DEFAULT_KEY_DELAY;
 
+		if (cl_headless_trace) {
+			guint64 limit = (cl_headless_trace_limit > 0)
+				? (guint64) cl_headless_trace_limit
+				: TRACE_DEFAULT_LIMIT_BYTES;
+
+			tilem_calc_emulator_lock(emu);
+			if (!tilem_trace_writer_init(&trace_writer, emu->calc,
+			                             cl_headless_trace,
+			                             cl_headless_trace_range,
+			                             limit, &trace_err)) {
+				tilem_calc_emulator_unlock(emu);
+				g_printerr("Trace error: %s\n", trace_err->message);
+				g_clear_error(&trace_err);
+				tilem_calc_emulator_pause(emu);
+				tilem_calc_emulator_free(emu);
+				ticables_library_exit();
+				tifiles_library_exit();
+				ticalcs_library_exit();
+				return 1;
+			}
+			tilem_calc_emulator_unlock(emu);
+			trace_enabled = TRUE;
+		}
+
 		if (cl_headless_macro) {
 			if (!tilem_headless_script_run(cl_headless_macro,
 			                               &headless_ops,
@@ -487,6 +527,11 @@ int main(int argc, char **argv)
 			                               &script_err)) {
 				g_printerr("Macro error: %s\n", script_err->message);
 				g_clear_error(&script_err);
+				if (trace_enabled) {
+					tilem_calc_emulator_lock(emu);
+					tilem_trace_writer_close(&trace_writer);
+					tilem_calc_emulator_unlock(emu);
+				}
 				tilem_calc_emulator_pause(emu);
 				tilem_calc_emulator_free(emu);
 				ticables_library_exit();
@@ -526,6 +571,12 @@ int main(int argc, char **argv)
 				}
 				g_object_unref(anim);
 			}
+		}
+
+		if (trace_enabled) {
+			tilem_calc_emulator_lock(emu);
+			tilem_trace_writer_close(&trace_writer);
+			tilem_calc_emulator_unlock(emu);
 		}
 
 		tilem_calc_emulator_pause(emu);

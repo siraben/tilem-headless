@@ -130,6 +130,7 @@ TilemCalc* tilem_calc_copy(TilemCalc* calc)
 	if (!newcalc)
 		return NULL;
 	memcpy(newcalc, calc, sizeof(TilemCalc));
+	newcalc->trace = NULL;
 
 	newcalc->hwregs = tilem_try_new_atomic(dword, calc->hw.nhwregs);
 	if (!newcalc->hwregs) {

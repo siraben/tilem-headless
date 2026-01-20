@@ -59,6 +59,7 @@ objects = tilem2.o \
 	fixedtreeview.o \
 	gifencod.o \
 	headless_script.o \
+	trace.o \
 	icons.o \
 	keybindings.o \
 	keypaddlg.o \
@@ -224,6 +225,9 @@ filedlg.o: filedlg.c filedlg.h
 # Headless script parser (shared with headless build)
 headless_script.o: $(top_srcdir)/headless/script.c $(top_srcdir)/headless/script.h
 	$(compile) -c $(top_srcdir)/headless/script.c -o headless_script.o
+
+trace.o: $(top_srcdir)/headless/trace.c $(top_srcdir)/headless/trace.h
+	$(compile) -c $(top_srcdir)/headless/trace.c -o trace.o
 
 # Fixed-width tree view
 fixedtreeview.o: fixedtreeview.c fixedtreeview.h
