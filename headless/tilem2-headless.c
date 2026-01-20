@@ -152,6 +152,71 @@ static gboolean save_animation(TilemAnimation *anim,
 	return ok;
 }
 
+static gboolean headless_save_screenshot(void *data, const char *path,
+                                         GError **err)
+{
+	HeadlessContext *ctx = data;
+	TilemAnimation *shot;
+	gboolean ok;
+
+	if (!path || !*path)
+		return FALSE;
+
+	tilem_lcd_get_frame(ctx->calc, ctx->lcd);
+	shot = tilem_animation_new(ctx->calc->hw.lcdwidth,
+	                           ctx->calc->hw.lcdheight);
+	tilem_animation_append_frame(shot, ctx->lcd, 1);
+	ok = save_animation(shot, path, "png");
+	g_object_unref(shot);
+	if (!ok && err && !*err) {
+		g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+		            "Failed to save screenshot to %s", path);
+	}
+	return ok;
+}
+
+static gboolean headless_write_memdump(void *data, const char *path,
+                                       const char *region,
+                                       GError **err)
+{
+	HeadlessContext *ctx = data;
+	const byte *base = NULL;
+	gsize size = 0;
+	gsize total;
+
+	if (!path || !*path)
+		return FALSE;
+
+	total = ctx->calc->hw.romsize + ctx->calc->hw.ramsize
+	        + ctx->calc->hw.lcdmemsize;
+
+	if (!region || !g_ascii_strcasecmp(region, "mem")
+	    || !g_ascii_strcasecmp(region, "all")) {
+		base = ctx->calc->mem;
+		size = total;
+	}
+	else if (!g_ascii_strcasecmp(region, "rom")) {
+		base = ctx->calc->mem;
+		size = ctx->calc->hw.romsize;
+	}
+	else if (!g_ascii_strcasecmp(region, "ram")) {
+		base = ctx->calc->ram;
+		size = ctx->calc->hw.ramsize;
+	}
+	else if (!g_ascii_strcasecmp(region, "lcd")) {
+		base = ctx->calc->lcdmem;
+		size = ctx->calc->hw.lcdmemsize;
+	}
+	else {
+		if (err)
+			g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+			            "Unknown memdump region '%s'", region);
+		return FALSE;
+	}
+
+	return g_file_set_contents(path, (const char *) base, size, err);
+}
+
 static TilemCalc *load_calc(const char *romname,
                             const char *statefname,
                             int model)
@@ -375,6 +440,8 @@ int main(int argc, char **argv)
 	ops.press_key = headless_press_key;
 	ops.release_key = headless_release_key;
 	ops.advance_time = headless_advance_time;
+	ops.screenshot = headless_save_screenshot;
+	ops.memdump = headless_write_memdump;
 
 	script_settings.key_hold = TILEM_HEADLESS_DEFAULT_KEY_HOLD;
 	script_settings.key_delay = TILEM_HEADLESS_DEFAULT_KEY_DELAY;

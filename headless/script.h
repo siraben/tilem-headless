@@ -19,6 +19,9 @@ typedef struct {
 	void (*press_key)(void *ctx, int key);
 	void (*release_key)(void *ctx, int key);
 	void (*advance_time)(void *ctx, double seconds);
+	gboolean (*screenshot)(void *ctx, const char *path, GError **err);
+	gboolean (*memdump)(void *ctx, const char *path,
+	                    const char *region, GError **err);
 } TilemHeadlessOps;
 
 typedef struct {

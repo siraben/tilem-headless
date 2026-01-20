@@ -109,6 +109,37 @@ static gboolean parse_seconds(const char *token, double *out)
 	return FALSE;
 }
 
+static gboolean parse_scancode(const char *token,
+                               int line_no,
+                               int *out,
+                               GError **err)
+{
+	char *end = NULL;
+	long value;
+
+	if (!token || !*token) {
+		g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+		            "Line %d: scancode requires a value", line_no);
+		return FALSE;
+	}
+
+	value = g_ascii_strtoll(token, &end, 0);
+	if (end == token || *end != '\0') {
+		g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+		            "Line %d: invalid scancode '%s'", line_no, token);
+		return FALSE;
+	}
+
+	if (value <= 0 || value > 0xff) {
+		g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+		            "Line %d: scancode out of range: %ld", line_no, value);
+		return FALSE;
+	}
+
+	*out = (int) value;
+	return TRUE;
+}
+
 static int keycode_from_name(const char *name)
 {
 	int i;
@@ -418,6 +449,27 @@ static gboolean run_line(TilemScriptState *state,
 			state->ops->release_key(state->ops->ctx, key);
 		}
 	}
+	else if (!g_ascii_strcasecmp(tokens[0], "scancode")
+	         || !g_ascii_strcasecmp(tokens[0], "keycode")
+	         || !g_ascii_strcasecmp(tokens[0], "rawkey")) {
+		double hold = state->settings.key_hold;
+		int key = 0;
+
+		if (!parse_scancode(tokens[1], line_no, &key, err)) {
+			ok = FALSE;
+		}
+		else if (tokens[2]) {
+			if (!parse_seconds(tokens[2], &hold) || hold < 0.0) {
+				g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+				            "Line %d: invalid hold time '%s'",
+				            line_no, tokens[2]);
+				ok = FALSE;
+			}
+		}
+
+		if (ok)
+			tap_key(state, key, hold);
+	}
 	else if (!g_ascii_strcasecmp(tokens[0], "type")) {
 		const char *text = trimmed + 4;
 		char *payload;
@@ -440,6 +492,45 @@ static gboolean run_line(TilemScriptState *state,
 		}
 		else {
 			ok = run_type(state, text, err);
+		}
+	}
+	else if (!g_ascii_strcasecmp(tokens[0], "screenshot")) {
+		if (!tokens[1]) {
+			g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+			            "Line %d: screenshot requires a path", line_no);
+			ok = FALSE;
+		}
+		else if (!state->ops->screenshot) {
+			g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+			            "Line %d: screenshot is not supported", line_no);
+			ok = FALSE;
+		}
+		else {
+			ok = state->ops->screenshot(state->ops->ctx, tokens[1], err);
+		}
+	}
+	else if (!g_ascii_strcasecmp(tokens[0], "memdump")) {
+		const char *region = NULL;
+
+		if (!tokens[1]) {
+			g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+			            "Line %d: memdump requires a path", line_no);
+			ok = FALSE;
+		}
+		else if (tokens[2]) {
+			region = tokens[2];
+		}
+
+		if (ok) {
+			if (!state->ops->memdump) {
+				g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+				            "Line %d: memdump is not supported", line_no);
+				ok = FALSE;
+			}
+			else {
+				ok = state->ops->memdump(state->ops->ctx, tokens[1],
+				                         region, err);
+			}
 		}
 	}
 	else {

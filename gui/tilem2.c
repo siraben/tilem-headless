@@ -263,6 +263,83 @@ static void gui_headless_advance_time(void *data, double seconds)
 		g_usleep((gulong)(seconds * G_USEC_PER_SEC));
 }
 
+static gboolean gui_headless_screenshot(void *data, const char *path,
+                                        GError **err)
+{
+	GuiHeadlessContext *ctx = data;
+	TilemAnimation *shot;
+	char *format;
+	gboolean ok;
+
+	if (!path || !*path)
+		return FALSE;
+
+	shot = tilem_calc_emulator_get_screenshot(ctx->emu, ctx->emu->grayscale);
+	if (!shot) {
+		if (err)
+			g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+			            "Unable to capture screenshot");
+		return FALSE;
+	}
+
+	format = g_ascii_strdown(strrchr(path, '.') ? strrchr(path, '.') + 1 : "png",
+	                         -1);
+	ok = tilem_animation_save(shot, path, format, NULL, NULL, err);
+	g_free(format);
+	g_object_unref(shot);
+	return ok;
+}
+
+static gboolean gui_headless_memdump(void *data, const char *path,
+                                     const char *region, GError **err)
+{
+	GuiHeadlessContext *ctx = data;
+	const byte *base = NULL;
+	gsize size = 0;
+	gsize total;
+	byte *copy = NULL;
+	gboolean ok;
+
+	if (!path || !*path)
+		return FALSE;
+
+	tilem_calc_emulator_lock(ctx->emu);
+	total = ctx->emu->calc->hw.romsize + ctx->emu->calc->hw.ramsize
+	        + ctx->emu->calc->hw.lcdmemsize;
+
+	if (!region || !g_ascii_strcasecmp(region, "mem")
+	    || !g_ascii_strcasecmp(region, "all")) {
+		base = ctx->emu->calc->mem;
+		size = total;
+	}
+	else if (!g_ascii_strcasecmp(region, "rom")) {
+		base = ctx->emu->calc->mem;
+		size = ctx->emu->calc->hw.romsize;
+	}
+	else if (!g_ascii_strcasecmp(region, "ram")) {
+		base = ctx->emu->calc->ram;
+		size = ctx->emu->calc->hw.ramsize;
+	}
+	else if (!g_ascii_strcasecmp(region, "lcd")) {
+		base = ctx->emu->calc->lcdmem;
+		size = ctx->emu->calc->hw.lcdmemsize;
+	}
+	else {
+		tilem_calc_emulator_unlock(ctx->emu);
+		if (err)
+			g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+			            "Unknown memdump region '%s'", region);
+		return FALSE;
+	}
+
+	copy = g_memdup2(base, size);
+	tilem_calc_emulator_unlock(ctx->emu);
+
+	ok = g_file_set_contents(path, (const char *) copy, size, err);
+	g_free(copy);
+	return ok;
+}
+
 int main(int argc, char **argv)
 {
 	TilemCalcEmulator* emu;
@@ -398,6 +475,8 @@ int main(int argc, char **argv)
 		headless_ops.press_key = gui_headless_press_key;
 		headless_ops.release_key = gui_headless_release_key;
 		headless_ops.advance_time = gui_headless_advance_time;
+		headless_ops.screenshot = gui_headless_screenshot;
+		headless_ops.memdump = gui_headless_memdump;
 		script_settings.key_hold = TILEM_HEADLESS_DEFAULT_KEY_HOLD;
 		script_settings.key_delay = TILEM_HEADLESS_DEFAULT_KEY_DELAY;
 
