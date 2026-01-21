@@ -32,6 +32,7 @@ objects = tilem2-headless.o \
 	animation.o \
 	animatedgif.o \
 	gifencod.o \
+	memory.o \
 	script.o \
 	trace.o
 
@@ -56,6 +57,9 @@ animatedgif.o: $(top_srcdir)/gui/animatedgif.c $(ANIM_HEADERS)
 
 gifencod.o: $(top_srcdir)/gui/gifencod.c $(top_srcdir)/gui/gifencod.h
 	$(compile) -c $(top_srcdir)/gui/gifencod.c
+
+memory.o: $(top_srcdir)/gui/memory.c
+	$(compile) -c $(top_srcdir)/gui/memory.c
 
 script.o: script.c script.h
 	$(compile) -c $(srcdir)/script.c

@@ -25,6 +25,14 @@
 #include "script.h"
 #include "trace.h"
 
+typedef struct {
+	TilemCalc *calc;
+	TilemLCDBuffer *lcd;
+	TilemAnimation *record;
+	gboolean limit_speed;
+	TilemTraceWriter *trace;
+} HeadlessContext;
+
 #define FRAME_MSEC 30
 #define FRAME_USEC (FRAME_MSEC * 1000)
 #define TRACE_DEFAULT_LIMIT_BYTES (500ULL * 1024ULL * 1024ULL * 1024ULL)
@@ -43,6 +51,8 @@ static gchar* cl_macro = NULL;
 static gchar* cl_trace = NULL;
 static gchar* cl_trace_range = NULL;
 static gint64 cl_trace_limit = 0;
+static gchar* cl_trace_backtrace = NULL;
+static gint64 cl_trace_backtrace_limit = 0;
 
 static GOptionEntry entries[] = {
 	{ "rom", 'r', 0, G_OPTION_ARG_FILENAME, &cl_romfile,
@@ -73,6 +83,11 @@ static GOptionEntry entries[] = {
 	  "Trace logical address range (e.g. ram, all, 0x8000-0xBFFF)", "RANGE" },
 	{ "trace-limit", 0, 0, G_OPTION_ARG_INT64, &cl_trace_limit,
 	  "Maximum trace size in bytes (default 500GB)", "BYTES" },
+	{ "trace-backtrace", 0, 0, G_OPTION_ARG_FILENAME, &cl_trace_backtrace,
+	  "Write a ring-buffer trace backtrace to FILE at exit", "FILE" },
+	{ "trace-backtrace-limit", 0, 0, G_OPTION_ARG_INT64,
+	  &cl_trace_backtrace_limit,
+	  "Backtrace ring size in bytes (default 1GB)", "BYTES" },
 	{ 0, 0, 0, 0, 0, 0, 0 }
 };
 
@@ -214,6 +229,23 @@ static gboolean headless_write_memdump(void *data, const char *path,
 		base = ctx->calc->ram;
 		size = ctx->calc->hw.ramsize;
 	}
+	else if (!g_ascii_strcasecmp(region, "ram-logical")
+	         || !g_ascii_strcasecmp(region, "lram")) {
+		guint8 *buf = NULL;
+		dword addr;
+		gboolean ok;
+
+		size = ctx->calc->hw.ramsize;
+		buf = g_malloc(size);
+		for (addr = 0; addr < size; addr++) {
+			dword logical = 0x8000 + addr;
+			dword phys = (*ctx->calc->hw.mem_ltop)(ctx->calc, logical);
+			buf[addr] = ctx->calc->mem[phys];
+		}
+		ok = g_file_set_contents(path, (const char *) buf, size, err);
+		g_free(buf);
+		return ok;
+	}
 	else if (!g_ascii_strcasecmp(region, "lcd")) {
 		base = ctx->calc->lcdmem;
 		size = ctx->calc->hw.lcdmemsize;
@@ -345,14 +377,6 @@ static void run_for(TilemCalc *calc,
 	}
 }
 
-typedef struct {
-	TilemCalc *calc;
-	TilemLCDBuffer *lcd;
-	TilemAnimation *record;
-	gboolean limit_speed;
-	TilemTraceWriter *trace;
-} HeadlessContext;
-
 static void headless_press_key(void *data, int key)
 {
 	HeadlessContext *ctx = data;
@@ -404,6 +428,10 @@ int main(int argc, char **argv)
 
 	if (cl_delay < 0.0) {
 		g_printerr("Delay must be non-negative.\n");
+		return 1;
+	}
+	if (cl_trace && cl_trace_backtrace) {
+		g_printerr("Use either --trace or --trace-backtrace, not both.\n");
 		return 1;
 	}
 
@@ -469,6 +497,24 @@ int main(int argc, char **argv)
 		if (!tilem_trace_writer_init(&trace_writer, calc, cl_trace,
 		                             cl_trace_range, limit,
 		                             &trace_err)) {
+			g_printerr("Trace error: %s\n", trace_err->message);
+			g_clear_error(&trace_err);
+			tilem_lcd_buffer_free(lcd);
+			tilem_calc_free(calc);
+			return 1;
+		}
+
+		ctx.trace = &trace_writer;
+	}
+	else if (cl_trace_backtrace) {
+		guint64 limit = (cl_trace_backtrace_limit > 0)
+			? (guint64) cl_trace_backtrace_limit
+			: (1ULL << 30);
+
+		if (!tilem_trace_writer_init_backtrace(&trace_writer, calc,
+		                                       cl_trace_backtrace,
+		                                       cl_trace_range, limit,
+		                                       &trace_err)) {
 			g_printerr("Trace error: %s\n", trace_err->message);
 			g_clear_error(&trace_err);
 			tilem_lcd_buffer_free(lcd);

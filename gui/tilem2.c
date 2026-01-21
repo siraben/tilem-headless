@@ -38,6 +38,7 @@
 #include "trace.h"
 
 #define TRACE_DEFAULT_LIMIT_BYTES (500ULL * 1024ULL * 1024ULL * 1024ULL)
+#define TRACE_BACKTRACE_DEFAULT_LIMIT_BYTES (1024ULL * 1024ULL * 1024ULL)
 
 /* CMD LINE OPTIONS */
 static gchar* cl_romfile = NULL;
@@ -60,6 +61,8 @@ static gchar* cl_headless_macro = NULL;
 static gchar* cl_headless_trace = NULL;
 static gchar* cl_headless_trace_range = NULL;
 static gint64 cl_headless_trace_limit = 0;
+static gchar* cl_headless_trace_backtrace = NULL;
+static gint64 cl_headless_trace_backtrace_limit = 0;
 
 
 static GOptionEntry entries[] =
@@ -82,6 +85,8 @@ static GOptionEntry entries[] =
 	{ "trace", 0, 0, G_OPTION_ARG_FILENAME, &cl_headless_trace, "Write binary instruction trace to FILE (headless mode)", "FILE" },
 	{ "trace-range", 0, 0, G_OPTION_ARG_STRING, &cl_headless_trace_range, "Trace logical address range (e.g. ram, all, 0x8000-0xBFFF)", "RANGE" },
 	{ "trace-limit", 0, 0, G_OPTION_ARG_INT64, &cl_headless_trace_limit, "Maximum trace size in bytes (default 500GB)", "BYTES" },
+	{ "trace-backtrace", 0, 0, G_OPTION_ARG_FILENAME, &cl_headless_trace_backtrace, "Write a ring-buffer trace backtrace to FILE at exit (headless mode)", "FILE" },
+	{ "trace-backtrace-limit", 0, 0, G_OPTION_ARG_INT64, &cl_headless_trace_backtrace_limit, "Backtrace ring size in bytes (default 1GB)", "BYTES" },
 	{ "macro", 0, 0, G_OPTION_ARG_FILENAME, &cl_headless_macro, "Execute macro script FILE (headless mode)", "FILE" },
 	{ G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &cl_files_to_load, NULL, "FILE" },
 	{ 0, 0, 0, 0, 0, 0, 0 }
@@ -329,6 +334,23 @@ static gboolean gui_headless_memdump(void *data, const char *path,
 		base = ctx->emu->calc->ram;
 		size = ctx->emu->calc->hw.ramsize;
 	}
+	else if (!g_ascii_strcasecmp(region, "ram-logical")
+	         || !g_ascii_strcasecmp(region, "lram")) {
+		dword addr;
+
+		size = ctx->emu->calc->hw.ramsize;
+		copy = g_malloc(size);
+		for (addr = 0; addr < size; addr++) {
+			dword logical = 0x8000 + addr;
+			dword phys = (*ctx->emu->calc->hw.mem_ltop)(ctx->emu->calc,
+			                                           logical);
+			copy[addr] = ctx->emu->calc->mem[phys];
+		}
+		tilem_calc_emulator_unlock(ctx->emu);
+		ok = g_file_set_contents(path, (const char *) copy, size, err);
+		g_free(copy);
+		return ok;
+	}
 	else if (!g_ascii_strcasecmp(region, "lcd")) {
 		base = ctx->emu->calc->lcdmem;
 		size = ctx->emu->calc->hw.lcdmemsize;
@@ -422,8 +444,13 @@ int main(int argc, char **argv)
 		g_printerr("--macro requires --headless.\n");
 		return 1;
 	}
-	if (cl_headless_trace && !cl_headless_flag) {
-		g_printerr("--trace requires --headless.\n");
+	if ((cl_headless_trace || cl_headless_trace_backtrace)
+	    && !cl_headless_flag) {
+		g_printerr("--trace/--trace-backtrace requires --headless.\n");
+		return 1;
+	}
+	if (cl_headless_trace && cl_headless_trace_backtrace) {
+		g_printerr("Use either --trace or --trace-backtrace, not both.\n");
 		return 1;
 	}
 
@@ -506,6 +533,29 @@ int main(int argc, char **argv)
 			                             cl_headless_trace,
 			                             cl_headless_trace_range,
 			                             limit, &trace_err)) {
+				tilem_calc_emulator_unlock(emu);
+				g_printerr("Trace error: %s\n", trace_err->message);
+				g_clear_error(&trace_err);
+				tilem_calc_emulator_pause(emu);
+				tilem_calc_emulator_free(emu);
+				ticables_library_exit();
+				tifiles_library_exit();
+				ticalcs_library_exit();
+				return 1;
+			}
+			tilem_calc_emulator_unlock(emu);
+			trace_enabled = TRUE;
+		}
+		else if (cl_headless_trace_backtrace) {
+			guint64 limit = (cl_headless_trace_backtrace_limit > 0)
+				? (guint64) cl_headless_trace_backtrace_limit
+				: TRACE_BACKTRACE_DEFAULT_LIMIT_BYTES;
+
+			tilem_calc_emulator_lock(emu);
+			if (!tilem_trace_writer_init_backtrace(&trace_writer, emu->calc,
+			                                       cl_headless_trace_backtrace,
+			                                       cl_headless_trace_range,
+			                                       limit, &trace_err)) {
 				tilem_calc_emulator_unlock(emu);
 				g_printerr("Trace error: %s\n", trace_err->message);
 				g_clear_error(&trace_err);
