@@ -93,6 +93,7 @@ Commands:
 - `press <NAME>` / `release <NAME>`
 - `scancode <hex|dec> [hold <time>]` (aliases: `keycode`, `rawkey`)
 - `type <text>` or `type "..."`
+- `scanstring <text>` or `scanstring "..."`
 - `screenshot <path.png>`
 - `memdump <path> [mem|all|rom|ram|ram-logical|lram|lcd]`
 
@@ -107,6 +108,11 @@ reliable way to enter Forth text because `type` uses the calculator's
 ALPHA key map, which does not match the zkeme80 Forth map.
 
 `scanstring` sends raw scan codes using the zkeme80 char lookup table
+directly, so you can type Forth input as readable ASCII (including
+digits and punctuation) without hand-writing `scancode` lines. It uses
+`key_hold` and `key_delay` between characters.
+
+`scanstring` sends raw scan codes using the ZKME80 char lookup table
 directly, so you can type Forth input as readable ASCII (including
 digits and punctuation) without hand-writing `scancode` lines. It uses
 `key_hold` and `key_delay` between characters.

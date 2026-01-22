@@ -207,6 +207,67 @@ static gboolean alpha_key_for_letter(char c, int *key)
 	return FALSE;
 }
 
+static gboolean scanstring_scancode_for_char(char c, int *scancode)
+{
+	unsigned char uc = (unsigned char) c;
+
+	if (g_ascii_isalpha(uc))
+		uc = (unsigned char) g_ascii_toupper(uc);
+
+	switch (uc) {
+	case 'A': *scancode = 47; return TRUE;
+	case 'B': *scancode = 39; return TRUE;
+	case 'C': *scancode = 31; return TRUE;
+	case 'D': *scancode = 46; return TRUE;
+	case 'E': *scancode = 38; return TRUE;
+	case 'F': *scancode = 30; return TRUE;
+	case 'G': *scancode = 22; return TRUE;
+	case 'H': *scancode = 14; return TRUE;
+	case 'I': *scancode = 45; return TRUE;
+	case 'J': *scancode = 37; return TRUE;
+	case 'K': *scancode = 29; return TRUE;
+	case 'L': *scancode = 21; return TRUE;
+	case 'M': *scancode = 13; return TRUE;
+	case 'N': *scancode = 44; return TRUE;
+	case 'O': *scancode = 36; return TRUE;
+	case 'P': *scancode = 28; return TRUE;
+	case 'Q': *scancode = 20; return TRUE;
+	case 'R': *scancode = 12; return TRUE;
+	case 'S': *scancode = 43; return TRUE;
+	case 'T': *scancode = 35; return TRUE;
+	case 'U': *scancode = 27; return TRUE;
+	case 'V': *scancode = 19; return TRUE;
+	case 'W': *scancode = 11; return TRUE;
+	case 'X': *scancode = 42; return TRUE;
+	case 'Y': *scancode = 34; return TRUE;
+	case 'Z': *scancode = 26; return TRUE;
+	case '0': *scancode = 1; return TRUE;
+	case '1': *scancode = 4; return TRUE;
+	case '2': *scancode = 17; return TRUE;
+	case '3': *scancode = 23; return TRUE;
+	case '4': *scancode = 32; return TRUE;
+	case '5': *scancode = 40; return TRUE;
+	case '6': *scancode = 49; return TRUE;
+	case '7': *scancode = 50; return TRUE;
+	case '8': *scancode = 51; return TRUE;
+	case '9': *scancode = 55; return TRUE;
+	case ' ': *scancode = 33; return TRUE;
+	case '.': *scancode = 25; return TRUE;
+	case ':': *scancode = 53; return TRUE;
+	case ';': *scancode = 52; return TRUE;
+	case '@': *scancode = 18; return TRUE;
+	case '+': *scancode = 10; return TRUE;
+	case '!': *scancode = 15; return TRUE;
+	case '\n': *scancode = 9; return TRUE;
+	case '\r': *scancode = 9; return TRUE;
+	case '\b': *scancode = 2; return TRUE;
+	default:
+		break;
+	}
+
+	return FALSE;
+}
+
 static void tap_key(TilemScriptState *state, int key, double hold)
 {
 	state->ops->press_key(state->ops->ctx, key);
@@ -280,6 +341,27 @@ static gboolean type_char(TilemScriptState *state, char c, GError **err)
 	return FALSE;
 }
 
+static gboolean scanstring_char(TilemScriptState *state, char c, GError **err)
+{
+	int scancode = 0;
+
+	if (!scanstring_scancode_for_char(c, &scancode)) {
+		if (g_ascii_isprint(c)) {
+			g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+			            "Unsupported scanstring character '%c'", c);
+		}
+		else {
+			g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+			            "Unsupported scanstring character 0x%02x",
+			            (unsigned char) c);
+		}
+		return FALSE;
+	}
+
+	tap_key(state, scancode, state->settings.key_hold);
+	return TRUE;
+}
+
 static gboolean run_type(TilemScriptState *state, const char *text, GError **err)
 {
 	int i;
@@ -291,6 +373,28 @@ static gboolean run_type(TilemScriptState *state, const char *text, GError **err
 	len = (int) strlen(text);
 	for (i = 0; i < len; i++) {
 		if (!type_char(state, text[i], err))
+			return FALSE;
+		if (state->settings.key_delay > 0.0 && i + 1 < len)
+			state->ops->advance_time(state->ops->ctx,
+			                         state->settings.key_delay);
+	}
+
+	return TRUE;
+}
+
+static gboolean run_scanstring(TilemScriptState *state,
+                               const char *text,
+                               GError **err)
+{
+	int i;
+	int len;
+
+	if (!text || !*text)
+		return TRUE;
+
+	len = (int) strlen(text);
+	for (i = 0; i < len; i++) {
+		if (!scanstring_char(state, text[i], err))
 			return FALSE;
 		if (state->settings.key_delay > 0.0 && i + 1 < len)
 			state->ops->advance_time(state->ops->ctx,
@@ -492,6 +596,30 @@ static gboolean run_line(TilemScriptState *state,
 		}
 		else {
 			ok = run_type(state, text, err);
+		}
+	}
+	else if (!g_ascii_strcasecmp(tokens[0], "scanstring")) {
+		const char *text = trimmed + 10;
+		char *payload;
+
+		while (*text && g_ascii_isspace(*text))
+			text++;
+
+		if (*text == '"') {
+			const char *end = strrchr(text + 1, '"');
+			if (!end || end == text + 1) {
+				g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+				            "Line %d: unterminated string", line_no);
+				ok = FALSE;
+			}
+			else {
+				payload = g_strndup(text + 1, end - text - 1);
+				ok = run_scanstring(state, payload, err);
+				g_free(payload);
+			}
+		}
+		else {
+			ok = run_scanstring(state, text, err);
 		}
 	}
 	else if (!g_ascii_strcasecmp(tokens[0], "screenshot")) {
