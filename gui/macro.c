@@ -131,14 +131,13 @@ void tilem_macro_write_file(TilemCalcEmulator *emu) {
 				printf("type : %d    value : %s\n", emu->macro->actions[i]->type, emu->macro->actions[i]->value);
 				/* Test if it's a key press or a file loading action */
 				if(emu->macro->actions[i]->type == 1) {
-					char * lengthchar = g_new0(char, 4);
-					int length = strlen(emu->macro->actions[i]->value);
+					char lengthchar[5];
+					int length = (int)strlen(emu->macro->actions[i]->value);
 					fwrite("file=", 1, 5, fp);
-					sprintf(lengthchar, "%04d", strlen(emu->macro->actions[i]->value));
-					fwrite(lengthchar, 1, sizeof(int), fp);
+					g_snprintf(lengthchar, sizeof(lengthchar), "%04d", length);
+					fwrite(lengthchar, 1, 4, fp);
 					fwrite("-", 1, 1, fp);
 					fwrite(emu->macro->actions[i]->value, 1, length, fp);
-					g_free(lengthchar);
 				} else {
 					fwrite(emu->macro->actions[i]->value, 1, 4, fp);
 					fwrite(",", 1, 1, fp);

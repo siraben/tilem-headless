@@ -950,7 +950,8 @@ static gboolean receive_files_silent(TilemCalcEmulator* emu,
 	FlashContent **apps, *flashc;
 	GSList *l;
 	TilemVarEntry *tve;
-	int e, i, nvars, napps;
+	int e = 0;
+	int i, nvars, napps;
 
 	g_return_val_if_fail(rf->entries != NULL, FALSE);
 

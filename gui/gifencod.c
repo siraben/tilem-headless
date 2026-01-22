@@ -99,15 +99,18 @@ void GifEncode(FILE *fout, unsigned char *pixels, int depth, int siz)
   int     cc, eoi, next, tel=0; //, dbw=0;
   short   cLength;
 
-  char    *pos, *buffer;
+  char    *pos, *buffer, *buffer_base;
 
   empty[0] = NULL;
   need = 8;
   nodeArray = empty;
   memmove(++nodeArray, empty, 255*sizeof(GifTree **));
-  if (( buffer = (char *)malloc((BUFLEN+1)*sizeof(char))) == NULL )
+  buffer_base = (char *)malloc((BUFLEN+1)*sizeof(char));
+  if (buffer_base == NULL) {
          printf("No memory for writing");
-  buffer++;
+         return;
+  }
+  buffer = buffer_base + 1;
 
   pos = buffer;
   buffer[0] = 0x0;
@@ -119,10 +122,21 @@ void GifEncode(FILE *fout, unsigned char *pixels, int depth, int siz)
 
   cLength = (short) ((depth == 1) ? 3 : depth+1);
   /*doubled due to 2 color gifs*/
-  if (( topNode = baseNode = (GifTree *)malloc(sizeof(GifTree)*4094*2)) == NULL )
+  baseNode = (GifTree *)malloc(sizeof(GifTree)*4094*2);
+  if (baseNode == NULL) {
          printf("No memory for GIF-code tree");
-  if (( nodeArray = first->node = (GifTree **)malloc(256*sizeof(GifTree *)*noOfArrays)) == NULL )
+         free(buffer_base);
+         return;
+  }
+  topNode = baseNode;
+  first->node = (GifTree **)malloc(256*sizeof(GifTree *)*noOfArrays);
+  if (first->node == NULL) {
          printf("No memory for search nodes");
+         free(buffer_base);
+         free(baseNode);
+         return;
+  }
+  nodeArray = first->node;
   lastArray = nodeArray + ( 256*noOfArrays - cc);
   ClearTree(cc, first);
 
@@ -255,8 +269,13 @@ void GifEncode(FILE *fout, unsigned char *pixels, int depth, int siz)
   buffer[-1] = (char) (pos-buffer);
 
   fwrite(buffer-1, pos-buffer+1, 1, fout);
-  free(buffer-1);  free(first->node); free(baseNode);
-  buffer=NULL;first->node=NULL;baseNode=NULL;
+  free(buffer_base);
+  free(first->node);
+  free(baseNode);
+  buffer = NULL;
+  buffer_base = NULL;
+  first->node = NULL;
+  baseNode = NULL;
 #ifdef _WHGDBG
   if (debugFlag) fprintf(stderr, "pixel count = %d; nodeCount = %d lookup nodes = %d\n", tel, nodecount, lookuptypes);
 #endif

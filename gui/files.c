@@ -233,7 +233,7 @@ static char * get_config_dir()
 	   locations, and is writable, use the directory containing
 	   it.  This will allow building the package as a relocatable
 	   bundle. */
-	fname = get_shared_file_path("config.ini", NULL);
+	fname = get_shared_file_path("config.ini", (const char *)NULL);
 	if (fname) {
 		f = g_fopen(fname, "r+");
 		if (f) {
@@ -267,4 +267,3 @@ char * get_config_file_path(const char *name, ...)
 	g_free(fullname);
 	return path;
 }
-

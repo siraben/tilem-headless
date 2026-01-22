@@ -17,6 +17,13 @@
         in
         {
           tilem = pkgs.callPackage ./package.nix { };
+          static-analysis = pkgs.buildEnv {
+            name = "tilem-static-analysis";
+            paths = [
+              pkgs.clang-tools
+              pkgs.cppcheck
+            ];
+          };
           default = self.packages.${system}.tilem;
         }
       );
