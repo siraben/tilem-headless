@@ -1038,6 +1038,33 @@ static void sdl_render_menu(TilemSdlUi *ui)
 
 static void sdl_render_lcd(TilemSdlUi *ui)
 {
+	SDL_Color text_color = { 200, 200, 200, 255 };
+	SDL_Color sub_color = { 160, 160, 160, 255 };
+	const char *line1 = "No ROM loaded";
+	const char *line2 = "Right-click to load";
+	int text_w1;
+	int text_w2;
+	int x1;
+	int x2;
+	int y1;
+	int y2;
+
+	if (!ui->emu->calc || !ui->emu->lcd_buffer) {
+		if (ui->menu_visible)
+			return;
+
+		text_w1 = sdl_menu_text_width(ui, line1);
+		text_w2 = sdl_menu_text_width(ui, line2);
+		x1 = ui->lcd_rect.x + (ui->lcd_rect.w - text_w1) / 2;
+		x2 = ui->lcd_rect.x + (ui->lcd_rect.w - text_w2) / 2;
+		y1 = ui->lcd_rect.y + (ui->lcd_rect.h / 2) - 16;
+		y2 = y1 + 20;
+
+		sdl_draw_text_menu(ui, x1, y1, line1, text_color);
+		sdl_draw_text_menu(ui, x2, y2, line2, sub_color);
+		return;
+	}
+
 	if (!ui->lcd_texture || !ui->lcd_pixels || !ui->lcd_palette)
 		return;
 
@@ -1382,7 +1409,7 @@ static gboolean sdl_load_initial(TilemSdlUi *ui,
 		char *state = NULL;
 
 		if (!rom)
-			return FALSE;
+			return TRUE;
 
 		state = sdl_pick_state_file(ui, "Open State (optional)");
 		if (sdl_load_state(ui, rom, state, model, &err)) {
@@ -1396,6 +1423,15 @@ static gboolean sdl_load_initial(TilemSdlUi *ui,
 		g_free(state);
 		err = NULL;
 	}
+}
+
+static void sdl_start_emulation(TilemSdlUi *ui)
+{
+	if (!ui->emu->calc)
+		return;
+
+	if (!ui->emu->z80_thread)
+		tilem_calc_emulator_run(ui->emu);
 }
 
 static void sdl_update_after_load(TilemSdlUi *ui)
@@ -1435,6 +1471,7 @@ static void sdl_handle_load_rom(TilemSdlUi *ui)
 	}
 
 	sdl_update_after_load(ui);
+	sdl_start_emulation(ui);
 	g_free(rom);
 	g_free(state);
 }
@@ -1462,6 +1499,7 @@ static void sdl_handle_load_state(TilemSdlUi *ui)
 	}
 
 	sdl_update_after_load(ui);
+	sdl_start_emulation(ui);
 	g_free(state);
 }
 
@@ -1635,9 +1673,17 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 	if (!sdl_load_initial(&ui, opts))
 		return 1;
 
-	ui.lcd_width = ui.emu->calc->hw.lcdwidth;
-	ui.lcd_height = ui.emu->calc->hw.lcdheight;
-	sdl_update_skin_for_calc(&ui);
+	if (ui.emu->calc) {
+		ui.lcd_width = ui.emu->calc->hw.lcdwidth;
+		ui.lcd_height = ui.emu->calc->hw.lcdheight;
+		sdl_update_skin_for_calc(&ui);
+	}
+	else {
+		ui.lcd_width = 96;
+		ui.lcd_height = 64;
+		sdl_free_skin(&ui);
+		sdl_set_palette(&ui);
+	}
 
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
 		g_printerr("SDL_Init failed: %s\n", SDL_GetError());
@@ -1710,7 +1756,8 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 	else if (opts->normal_speed)
 		tilem_calc_emulator_set_limit_speed(ui.emu, TRUE);
 
-	tilem_calc_emulator_run(ui.emu);
+	if (ui.emu->calc)
+		tilem_calc_emulator_run(ui.emu);
 
 	while (running) {
 		while (SDL_PollEvent(&event)) {
