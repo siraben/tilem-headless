@@ -26,7 +26,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
-#include <gtk/gtk.h>
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -35,7 +34,6 @@
 #include <scancodes.h>
 
 #include "sdlui.h"
-#include "filedlg.h"
 #include "files.h"
 #include "gui.h"
 #include "skinops.h"
@@ -77,7 +75,6 @@ typedef struct {
 	int menu_width;
 	int menu_height;
 	int menu_selected;
-	gboolean gtk_ready;
 	TTF_Font *menu_font;
 	gboolean ttf_ready;
 } TilemSdlUi;
@@ -569,18 +566,6 @@ static char *sdl_native_file_dialog(const char *title,
 #endif
 
 	return NULL;
-}
-
-static void sdl_ensure_gtk(TilemSdlUi *ui)
-{
-	int argc = 0;
-	char **argv = NULL;
-
-	if (ui->gtk_ready)
-		return;
-
-	gtk_init(&argc, &argv);
-	ui->gtk_ready = TRUE;
 }
 
 static int sdl_text_width(const char *text, int scale)
@@ -1204,23 +1189,11 @@ static char *sdl_pick_rom_file(TilemSdlUi *ui)
 	                                  dir, NULL, FALSE, &used_native);
 	g_free(dir);
 
-	if (used_native)
-		return filename;
+	if (!filename && !used_native) {
+		sdl_show_message(ui, "Load ROM",
+		                 "No native file picker available.");
+	}
 
-	sdl_ensure_gtk(ui);
-
-	if (ui->emu->rom_file_name)
-		dir = g_path_get_dirname(ui->emu->rom_file_name);
-	else
-		dir = g_get_current_dir();
-
-	filename = prompt_open_file("Open Calculator",
-	                            NULL,
-	                            dir,
-	                            "ROM files", "*.rom;*.clc;*.bin",
-	                            "All files", "*",
-	                            NULL);
-	g_free(dir);
 	return filename;
 }
 
@@ -1238,14 +1211,11 @@ static char *sdl_pick_state_file(TilemSdlUi *ui, const char *title)
 		dir = g_get_current_dir();
 
 	filename = sdl_native_file_dialog(title, dir, NULL, FALSE, &used_native);
-	if (!used_native) {
-		sdl_ensure_gtk(ui);
-		filename = prompt_open_file(title, NULL, dir,
-		                            "State files", "*.sav",
-		                            "All files", "*",
-		                            NULL);
-	}
 	g_free(dir);
+	if (!filename && !used_native) {
+		sdl_show_message(ui, "Load State",
+		                 "No native file picker available.");
+	}
 	return filename;
 }
 
@@ -1272,19 +1242,13 @@ static char *sdl_pick_state_save_file(TilemSdlUi *ui)
 
 	filename = sdl_native_file_dialog("Save State As", dir, suggest_name,
 	                                  TRUE, &used_native);
-	if (!used_native) {
-		sdl_ensure_gtk(ui);
-		filename = prompt_save_file("Save State As",
-		                            NULL,
-		                            suggest_name,
-		                            dir,
-		                            "State files", "*.sav",
-		                            "All files", "*",
-		                            NULL);
-	}
 
 	g_free(dir);
 	g_free(suggest_name);
+	if (!filename && !used_native) {
+		sdl_show_message(ui, "Save State",
+		                 "No native file picker available.");
+	}
 	return filename;
 }
 
