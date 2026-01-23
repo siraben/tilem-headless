@@ -22,6 +22,7 @@
 #endif
 
 #include <SDL.h>
+#include <SDL_ttf.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -44,6 +45,7 @@
 #define SDL_MENU_FONT_SCALE 2
 #define SDL_MENU_PADDING 6
 #define SDL_MENU_SPACING 2
+#define SDL_MENU_FONT_SIZE 16
 
 typedef struct {
 	TilemCalcEmulator *emu;
@@ -76,6 +78,8 @@ typedef struct {
 	int menu_height;
 	int menu_selected;
 	gboolean gtk_ready;
+	TTF_Font *menu_font;
+	gboolean ttf_ready;
 } TilemSdlUi;
 
 typedef enum {
@@ -354,6 +358,37 @@ static void sdl_show_message(TilemSdlUi *ui, const char *title,
 	                         ui ? ui->window : NULL);
 }
 
+static void sdl_init_ttf(TilemSdlUi *ui);
+static void sdl_shutdown_ttf(TilemSdlUi *ui);
+
+static char *sdl_find_font_path(void)
+{
+	const char *env = g_getenv("TILEM_SDL_FONT");
+	const char *candidates[] = {
+		"/System/Library/Fonts/Supplemental/Arial.ttf",
+		"/System/Library/Fonts/Supplemental/Helvetica.ttf",
+		"/System/Library/Fonts/Supplemental/Verdana.ttf",
+		"/Library/Fonts/Arial.ttf",
+		"/Library/Fonts/Helvetica.ttf",
+		"/Library/Fonts/Verdana.ttf",
+		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+		"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+		"/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+		NULL
+	};
+	int i;
+
+	if (env && *env)
+		return g_strdup(env);
+
+	for (i = 0; candidates[i]; i++) {
+		if (g_file_test(candidates[i], G_FILE_TEST_IS_REGULAR))
+			return g_strdup(candidates[i]);
+	}
+
+	return NULL;
+}
+
 static void sdl_ensure_gtk(TilemSdlUi *ui)
 {
 	int argc = 0;
@@ -374,6 +409,7 @@ static int sdl_text_width(const char *text, int scale)
 static void sdl_draw_char(SDL_Renderer *renderer, int x, int y,
                           int scale, unsigned char c, SDL_Color color)
 {
+	int use_scale = scale > 0 ? scale : 1;
 	int row, col;
 	const unsigned char *glyph;
 	SDL_Rect pixel;
@@ -391,14 +427,14 @@ static void sdl_draw_char(SDL_Renderer *renderer, int x, int y,
 	}
 	SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
 
-	pixel.w = scale;
-	pixel.h = scale;
+	pixel.w = use_scale;
+	pixel.h = use_scale;
 
 	for (row = 0; row < 8; row++) {
 		for (col = 0; col < 8; col++) {
 			if (glyph[row] & (0x80 >> col)) {
-				pixel.x = x + col * scale;
-				pixel.y = y + row * scale;
+				pixel.x = x + col * use_scale;
+				pixel.y = y + row * use_scale;
 				SDL_RenderFillRect(renderer, &pixel);
 			}
 		}
@@ -651,23 +687,68 @@ static void sdl_update_layout(TilemSdlUi *ui, int win_w, int win_h)
 	sdl_resize_lcd_texture(ui, ui->lcd_rect.w, ui->lcd_rect.h);
 }
 
-static int sdl_menu_item_height(void)
+static int sdl_menu_item_height(TilemSdlUi *ui)
 {
+	if (ui->menu_font)
+		return TTF_FontHeight(ui->menu_font) + SDL_MENU_PADDING * 2;
 	return 8 * SDL_MENU_FONT_SCALE + SDL_MENU_PADDING * 2;
+}
+
+static int sdl_menu_text_width(TilemSdlUi *ui, const char *text)
+{
+	int width = 0;
+	int height = 0;
+
+	if (ui->menu_font) {
+		if (TTF_SizeUTF8(ui->menu_font, text, &width, &height) == 0)
+			return width;
+	}
+
+	return sdl_text_width(text, SDL_MENU_FONT_SCALE);
+}
+
+static void sdl_draw_text_menu(TilemSdlUi *ui, int x, int y,
+                               const char *text, SDL_Color color)
+{
+	if (ui->menu_font) {
+		SDL_Surface *surface = TTF_RenderUTF8_Blended(ui->menu_font,
+		                                              text, color);
+		SDL_Texture *texture;
+		SDL_Rect dst;
+
+		if (!surface)
+			return;
+
+		texture = SDL_CreateTextureFromSurface(ui->renderer, surface);
+		if (!texture) {
+			SDL_FreeSurface(surface);
+			return;
+		}
+
+		dst.x = x;
+		dst.y = y;
+		dst.w = surface->w;
+		dst.h = surface->h;
+		SDL_RenderCopy(ui->renderer, texture, NULL, &dst);
+		SDL_DestroyTexture(texture);
+		SDL_FreeSurface(surface);
+		return;
+	}
+
+	sdl_draw_text(ui->renderer, x, y, SDL_MENU_FONT_SCALE, text, color);
 }
 
 static void sdl_menu_show(TilemSdlUi *ui, int x, int y)
 {
 	size_t i;
 	int maxw = 0;
-	int item_h = sdl_menu_item_height();
+	int item_h = sdl_menu_item_height(ui);
 	int text_w;
 	int menu_w;
 	int menu_h;
 
 	for (i = 0; i < G_N_ELEMENTS(sdl_menu_items); i++) {
-		text_w = sdl_text_width(sdl_menu_items[i].label,
-		                        SDL_MENU_FONT_SCALE);
+		text_w = sdl_menu_text_width(ui, sdl_menu_items[i].label);
 		if (text_w > maxw)
 			maxw = text_w;
 	}
@@ -710,7 +791,7 @@ static int sdl_menu_hit_test(TilemSdlUi *ui, int x, int y)
 	    || y >= ui->menu_y + ui->menu_height)
 		return -1;
 
-	item_h = sdl_menu_item_height();
+	item_h = sdl_menu_item_height(ui);
 	rel_y = y - ui->menu_y - SDL_MENU_SPACING;
 	if (rel_y < 0)
 		return -1;
@@ -736,7 +817,7 @@ static void sdl_render_menu(TilemSdlUi *ui)
 	if (!ui->menu_visible)
 		return;
 
-	item_h = sdl_menu_item_height();
+	item_h = sdl_menu_item_height(ui);
 	menu_rect.x = ui->menu_x;
 	menu_rect.y = ui->menu_y;
 	menu_rect.w = ui->menu_width;
@@ -765,11 +846,11 @@ static void sdl_render_menu(TilemSdlUi *ui)
 			SDL_RenderFillRect(ui->renderer, &item_rect);
 		}
 
-		sdl_draw_text(ui->renderer,
-		              item_rect.x + SDL_MENU_PADDING,
-		              item_rect.y + SDL_MENU_PADDING,
-		              SDL_MENU_FONT_SCALE,
-		              sdl_menu_items[i].label, text_color);
+		sdl_draw_text_menu(ui,
+		                   item_rect.x + SDL_MENU_PADDING,
+		                   item_rect.y + SDL_MENU_PADDING,
+		                   sdl_menu_items[i].label,
+		                   text_color);
 	}
 }
 
@@ -1278,6 +1359,48 @@ static void sdl_cleanup(TilemSdlUi *ui)
 	if (ui->lcd_palette)
 		tilem_free(ui->lcd_palette);
 	ui->lcd_palette = NULL;
+
+	sdl_shutdown_ttf(ui);
+}
+
+static void sdl_init_ttf(TilemSdlUi *ui)
+{
+	char *font_path;
+
+	if (TTF_WasInit())
+		ui->ttf_ready = TRUE;
+
+	if (!ui->ttf_ready) {
+		if (TTF_Init() != 0) {
+			g_printerr("SDL_ttf init failed: %s\n", TTF_GetError());
+			return;
+		}
+		ui->ttf_ready = TRUE;
+	}
+
+	font_path = sdl_find_font_path();
+	if (!font_path) {
+		g_printerr("SDL_ttf font not found; set TILEM_SDL_FONT\n");
+		return;
+	}
+
+	ui->menu_font = TTF_OpenFont(font_path, SDL_MENU_FONT_SIZE);
+	if (!ui->menu_font)
+		g_printerr("SDL_ttf open failed: %s\n", TTF_GetError());
+
+	g_free(font_path);
+}
+
+static void sdl_shutdown_ttf(TilemSdlUi *ui)
+{
+	if (ui->menu_font) {
+		TTF_CloseFont(ui->menu_font);
+		ui->menu_font = NULL;
+	}
+
+	if (ui->ttf_ready && TTF_WasInit())
+		TTF_Quit();
+	ui->ttf_ready = FALSE;
 }
 
 int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
@@ -1367,6 +1490,8 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 		if (!ui.skin_texture)
 			g_printerr("Unable to create SDL texture for skin\n");
 	}
+
+	sdl_init_ttf(&ui);
 
 	SDL_GetWindowSize(ui.window, &ui.window_width, &ui.window_height);
 	sdl_update_layout(&ui, ui.window_width, ui.window_height);

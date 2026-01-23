@@ -110,6 +110,25 @@ You must install SDL2 (including the -dev/-devel packages if
 appropriate.)])
 fi
 
+# SDL2_ttf
+
+PKG_CHECK_MODULES(SDL2_TTF, SDL2_ttf >= 2.0.0,
+                  [ have_sdl2_ttf=maybe ], [ have_sdl2_ttf=no ])
+
+if test "x$have_sdl2_ttf" = "xmaybe" ; then
+  with_flags(SDL2_TTF,
+    [ AC_CHECK_FUNC(TTF_Init, [ have_sdl2_ttf=yes ], [ have_sdl2_ttf=no ]) ])
+fi
+
+if test "x$have_sdl2_ttf" != "xyes" ; then
+  AC_MSG_ERROR([SDL2_ttf not found or not usable.
+
+$SDL2_TTF_PKG_ERRORS
+
+You must install SDL2_ttf (including the -dev/-devel packages if
+appropriate.)])
+fi
+
 # Libticalcs2 and related libraries
 
 PKG_CHECK_MODULES(TICALCS, ticalcs2 ticables2 tifiles2 ticonv,
