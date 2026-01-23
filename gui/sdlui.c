@@ -24,21 +24,30 @@
 #include <SDL.h>
 #include <SDL_ttf.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 
 #include <glib.h>
 #include <glib/gstdio.h>
-#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <ticalcs.h>
 #include <tilem.h>
 #include <scancodes.h>
 
 #include "sdlui.h"
 #include "files.h"
-#include "gui.h"
 #include "skinops.h"
+#include "sdlpixbuf.h"
+#include "sdlscreenshot.h"
 #include "ti81prg.h"
+
+void tilem_config_get(const char *group, const char *option, ...);
+void tilem_config_set(const char *group, const char *option, ...);
+void tilem_link_send_file(TilemCalcEmulator *emu, const char *filename,
+                          int slot, gboolean first, gboolean last);
+void tilem_link_receive_all(TilemCalcEmulator *emu,
+                            const char *destination);
+int name_to_model(const char *name);
 
 #define SDL_LCD_GAMMA 2.2
 #define SDL_FRAME_DELAY_MS 16
@@ -79,6 +88,8 @@ typedef struct {
 	int menu_selected;
 	TTF_Font *menu_font;
 	gboolean ttf_ready;
+	int keypress_keycodes[64];
+	int sequence_keycode;
 } TilemSdlUi;
 
 typedef enum {
@@ -255,6 +266,431 @@ static const unsigned char sdl_font8x8_basic[128][8] = {
 	{ 0x00,0x10,0x38,0x6c,0xc6,0xc6,0xfe,0x00 }, /* 0x7e */
 	{ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 }  /* 0x7f */
 };
+
+static int sdl_calc_key_from_name(const TilemCalc *calc, const char *name)
+{
+	int i;
+
+	for (i = 0; i < 64; i++) {
+		if (calc->hw.keynames[i]
+		    && !strcmp(calc->hw.keynames[i], name))
+			return i + 1;
+	}
+
+	for (i = 0; i < 64; i++) {
+		if (!calc->hw.keynames[i])
+			continue;
+
+		if (!strcmp(name, "Matrix")
+		    && !strcmp(calc->hw.keynames[i], "Apps"))
+			return i + 1;
+		if (!strcmp(name, "Apps")
+		    && !strcmp(calc->hw.keynames[i], "AppsMenu"))
+			return i + 1;
+		if (!strcmp(name, "List")
+		    && !strcmp(calc->hw.keynames[i], "StatEd"))
+			return i + 1;
+		if (!strcmp(name, "Power")
+		    && !strcmp(calc->hw.keynames[i], "Expon"))
+			return i + 1;
+		if (!strcmp(name, "Stat")
+		    && !strcmp(calc->hw.keynames[i], "Table"))
+			return i + 1;
+	}
+
+	return 0;
+}
+
+static SDL_Keycode sdl_keycode_from_name(const char *name,
+                                         gboolean *force_shift)
+{
+	const char *kp;
+	size_t len;
+
+	if (force_shift)
+		*force_shift = FALSE;
+
+	if (!name || !*name)
+		return SDLK_UNKNOWN;
+
+	len = strlen(name);
+	if (len == 1) {
+		char c = name[0];
+		if (g_ascii_isalpha(c)) {
+			if (g_ascii_isupper(c) && force_shift)
+				*force_shift = TRUE;
+			c = g_ascii_tolower(c);
+		}
+		return (SDL_Keycode) c;
+	}
+
+	if (!g_ascii_strcasecmp(name, "BackSpace"))
+		return SDLK_BACKSPACE;
+	if (!g_ascii_strcasecmp(name, "Delete"))
+		return SDLK_DELETE;
+	if (!g_ascii_strcasecmp(name, "Escape"))
+		return SDLK_ESCAPE;
+	if (!g_ascii_strcasecmp(name, "Return"))
+		return SDLK_RETURN;
+	if (!g_ascii_strcasecmp(name, "ISO_Enter"))
+		return SDLK_RETURN;
+	if (!g_ascii_strcasecmp(name, "Tab"))
+		return SDLK_TAB;
+	if (!g_ascii_strcasecmp(name, "ISO_Left_Tab")) {
+		if (force_shift)
+			*force_shift = TRUE;
+		return SDLK_TAB;
+	}
+	if (!g_ascii_strcasecmp(name, "Insert"))
+		return SDLK_INSERT;
+	if (!g_ascii_strcasecmp(name, "Home"))
+		return SDLK_HOME;
+	if (!g_ascii_strcasecmp(name, "End"))
+		return SDLK_END;
+	if (!g_ascii_strcasecmp(name, "Page_Up"))
+		return SDLK_PAGEUP;
+	if (!g_ascii_strcasecmp(name, "Page_Down"))
+		return SDLK_PAGEDOWN;
+	if (!g_ascii_strcasecmp(name, "Left"))
+		return SDLK_LEFT;
+	if (!g_ascii_strcasecmp(name, "Right"))
+		return SDLK_RIGHT;
+	if (!g_ascii_strcasecmp(name, "Up"))
+		return SDLK_UP;
+	if (!g_ascii_strcasecmp(name, "Down"))
+		return SDLK_DOWN;
+	if (!g_ascii_strcasecmp(name, "Menu"))
+		return SDLK_MENU;
+	if (!g_ascii_strcasecmp(name, "space"))
+		return SDLK_SPACE;
+
+	if (!g_ascii_strcasecmp(name, "comma"))
+		return ',';
+	if (!g_ascii_strcasecmp(name, "period"))
+		return '.';
+	if (!g_ascii_strcasecmp(name, "slash"))
+		return '/';
+	if (!g_ascii_strcasecmp(name, "backslash"))
+		return '\\';
+	if (!g_ascii_strcasecmp(name, "apostrophe"))
+		return '\'';
+	if (!g_ascii_strcasecmp(name, "quotedbl"))
+		return '"';
+	if (!g_ascii_strcasecmp(name, "colon"))
+		return ':';
+	if (!g_ascii_strcasecmp(name, "question"))
+		return '?';
+	if (!g_ascii_strcasecmp(name, "minus"))
+		return '-';
+	if (!g_ascii_strcasecmp(name, "plus"))
+		return '+';
+	if (!g_ascii_strcasecmp(name, "asterisk"))
+		return '*';
+	if (!g_ascii_strcasecmp(name, "equal"))
+		return '=';
+	if (!g_ascii_strcasecmp(name, "greater"))
+		return '>';
+	if (!g_ascii_strcasecmp(name, "less"))
+		return '<';
+	if (!g_ascii_strcasecmp(name, "parenleft"))
+		return '(';
+	if (!g_ascii_strcasecmp(name, "parenright"))
+		return ')';
+	if (!g_ascii_strcasecmp(name, "braceleft"))
+		return '{';
+	if (!g_ascii_strcasecmp(name, "braceright"))
+		return '}';
+	if (!g_ascii_strcasecmp(name, "bracketleft"))
+		return '[';
+	if (!g_ascii_strcasecmp(name, "bracketright"))
+		return ']';
+	if (!g_ascii_strcasecmp(name, "underscore"))
+		return '_';
+	if (!g_ascii_strcasecmp(name, "bar"))
+		return '|';
+	if (!g_ascii_strcasecmp(name, "brokenbar"))
+		return 0x00a6;
+	if (!g_ascii_strcasecmp(name, "asciitilde"))
+		return '~';
+	if (!g_ascii_strcasecmp(name, "dead_tilde"))
+		return '~';
+	if (!g_ascii_strcasecmp(name, "asciicircum"))
+		return '^';
+	if (!g_ascii_strcasecmp(name, "dead_circumflex"))
+		return '^';
+	if (!g_ascii_strcasecmp(name, "numbersign"))
+		return '#';
+	if (!g_ascii_strcasecmp(name, "dollar"))
+		return '$';
+	if (!g_ascii_strcasecmp(name, "percent"))
+		return '%';
+	if (!g_ascii_strcasecmp(name, "ampersand"))
+		return '&';
+	if (!g_ascii_strcasecmp(name, "at"))
+		return '@';
+	if (!g_ascii_strcasecmp(name, "plusminus"))
+		return 0x00b1;
+	if (!g_ascii_strcasecmp(name, "onesuperior"))
+		return 0x00b9;
+	if (!g_ascii_strcasecmp(name, "twosuperior"))
+		return 0x00b2;
+	if (!g_ascii_strcasecmp(name, "onehalf"))
+		return 0x00bd;
+	if (!g_ascii_strcasecmp(name, "EuroSign"))
+		return 0x20ac;
+
+	if (len >= 2 && (name[0] == 'F' || name[0] == 'f')) {
+		int fn = atoi(name + 1);
+		if (fn >= 1 && fn <= 24)
+			return SDLK_F1 + (fn - 1);
+	}
+
+	kp = g_str_has_prefix(name, "KP_") ? name + 3 : NULL;
+	if (kp && g_ascii_isdigit(kp[0]) && kp[1] == '\0')
+		return SDLK_KP_0 + (kp[0] - '0');
+	if (kp && !g_ascii_strcasecmp(kp, "Add"))
+		return SDLK_KP_PLUS;
+	if (kp && !g_ascii_strcasecmp(kp, "Subtract"))
+		return SDLK_KP_MINUS;
+	if (kp && !g_ascii_strcasecmp(kp, "Multiply"))
+		return SDLK_KP_MULTIPLY;
+	if (kp && !g_ascii_strcasecmp(kp, "Divide"))
+		return SDLK_KP_DIVIDE;
+	if (kp && !g_ascii_strcasecmp(kp, "Decimal"))
+		return SDLK_KP_PERIOD;
+	if (kp && !g_ascii_strcasecmp(kp, "Enter"))
+		return SDLK_KP_ENTER;
+	if (kp && !g_ascii_strcasecmp(kp, "Tab"))
+		return SDLK_TAB;
+	if (kp && !g_ascii_strcasecmp(kp, "Up"))
+		return SDLK_KP_8;
+	if (kp && !g_ascii_strcasecmp(kp, "Down"))
+		return SDLK_KP_2;
+	if (kp && !g_ascii_strcasecmp(kp, "Left"))
+		return SDLK_KP_4;
+	if (kp && !g_ascii_strcasecmp(kp, "Right"))
+		return SDLK_KP_6;
+	if (kp && !g_ascii_strcasecmp(kp, "Home"))
+		return SDLK_KP_7;
+	if (kp && !g_ascii_strcasecmp(kp, "End"))
+		return SDLK_KP_1;
+	if (kp && !g_ascii_strcasecmp(kp, "Page_Up"))
+		return SDLK_KP_9;
+	if (kp && !g_ascii_strcasecmp(kp, "Page_Down"))
+		return SDLK_KP_3;
+	if (kp && !g_ascii_strcasecmp(kp, "Insert"))
+		return SDLK_KP_0;
+	if (kp && !g_ascii_strcasecmp(kp, "Delete"))
+		return SDLK_KP_PERIOD;
+
+	return SDLK_UNKNOWN;
+}
+
+static gboolean sdl_parse_binding(TilemKeyBinding *kb,
+                                  const char *pckeys, const char *tikeys,
+                                  const TilemCalc *calc)
+{
+	const char *p;
+	char *s;
+	int n, k;
+	gboolean force_shift = FALSE;
+
+	kb->modifiers = 0;
+	kb->keysym = 0;
+	kb->nscancodes = 0;
+	kb->scancodes = NULL;
+
+	while ((p = strchr(pckeys, '+'))) {
+		s = g_strndup(pckeys, p - pckeys);
+		g_strstrip(s);
+		if (!g_ascii_strcasecmp(s, "ctrl")
+		    || !g_ascii_strcasecmp(s, "control"))
+			kb->modifiers |= KMOD_CTRL;
+		else if (!g_ascii_strcasecmp(s, "shift"))
+			kb->modifiers |= KMOD_SHIFT;
+		else if (!g_ascii_strcasecmp(s, "alt")
+		         || !g_ascii_strcasecmp(s, "mod1"))
+			kb->modifiers |= KMOD_ALT;
+		else if (!g_ascii_strcasecmp(s, "capslock")
+		         || !g_ascii_strcasecmp(s, "lock"))
+			kb->modifiers |= KMOD_CAPS;
+		else {
+			g_free(s);
+			return FALSE;
+		}
+		g_free(s);
+		pckeys = p + 1;
+	}
+
+	s = g_strstrip(g_strdup(pckeys));
+	kb->keysym = sdl_keycode_from_name(s, &force_shift);
+	g_free(s);
+	if (!kb->keysym)
+		return FALSE;
+	if (force_shift)
+		kb->modifiers |= KMOD_SHIFT;
+
+	n = 0;
+	do {
+		if ((p = strchr(tikeys, ',')))
+			s = g_strndup(tikeys, p - tikeys);
+		else
+			s = g_strdup(tikeys);
+		g_strstrip(s);
+
+		k = sdl_calc_key_from_name(calc, s);
+		g_free(s);
+
+		if (!k) {
+			g_free(kb->scancodes);
+			kb->scancodes = NULL;
+			return FALSE;
+		}
+
+		kb->nscancodes++;
+		if (kb->nscancodes >= n) {
+			n = kb->nscancodes * 2;
+			kb->scancodes = g_renew(byte, kb->scancodes, n);
+		}
+		kb->scancodes[kb->nscancodes - 1] = k;
+
+		tikeys = (p ? p + 1 : NULL);
+	} while (tikeys);
+
+	return TRUE;
+}
+
+static void sdl_parse_binding_group(TilemCalcEmulator *emu, GKeyFile *gkf,
+                                    const char *group, int maxdepth)
+{
+	gchar **keys, **groups;
+	char *k, *v;
+	int i, n;
+
+	keys = g_key_file_get_keys(gkf, group, NULL, NULL);
+	if (!keys) {
+		g_printerr("no bindings for %s\n", group);
+		return;
+	}
+
+	for (i = 0; keys[i]; i++)
+		;
+
+	n = emu->nkeybindings;
+	emu->keybindings = g_renew(TilemKeyBinding, emu->keybindings, n + i);
+
+	for (i = 0; keys[i]; i++) {
+		k = keys[i];
+		if (!strcmp(k, "INHERIT"))
+			continue;
+
+		v = g_key_file_get_value(gkf, group, k, NULL);
+		if (!v)
+			continue;
+
+		if (sdl_parse_binding(&emu->keybindings[n], k, v, emu->calc))
+			n++;
+		else
+			g_printerr("syntax error in key bindings: '%s=%s'\n",
+			           k, v);
+		g_free(v);
+	}
+
+	emu->nkeybindings = n;
+
+	g_strfreev(keys);
+
+	if (maxdepth == 0)
+		return;
+
+	groups = g_key_file_get_string_list(gkf, group, "INHERIT",
+	                                    NULL, NULL);
+	for (i = 0; groups && groups[i]; i++)
+		sdl_parse_binding_group(emu, gkf, groups[i], maxdepth - 1);
+	g_strfreev(groups);
+}
+
+static void sdl_keybindings_init(TilemCalcEmulator *emu, const char *model)
+{
+	char *kfname = get_shared_file_path("keybindings.ini", NULL);
+	GKeyFile *gkf;
+	GError *err = NULL;
+	int i;
+
+	g_return_if_fail(emu != NULL);
+	g_return_if_fail(emu->calc != NULL);
+
+	if (!kfname) {
+		g_printerr("Unable to load key bindings: keybindings.ini not found.\n");
+		return;
+	}
+
+	gkf = g_key_file_new();
+	if (!g_key_file_load_from_file(gkf, kfname, 0, &err)) {
+		g_printerr("Unable to load key bindings: %s\n",
+		           err ? err->message : "unknown error");
+		g_clear_error(&err);
+		g_key_file_free(gkf);
+		g_free(kfname);
+		return;
+	}
+
+	for (i = 0; i < emu->nkeybindings; i++)
+		g_free(emu->keybindings[i].scancodes);
+	g_free(emu->keybindings);
+	emu->keybindings = NULL;
+	emu->nkeybindings = 0;
+
+	sdl_parse_binding_group(emu, gkf, model, 5);
+
+	g_key_file_free(gkf);
+	g_free(kfname);
+}
+
+static TilemKeyBinding *sdl_find_key_binding_for_key(TilemCalcEmulator *emu,
+                                                     SDL_Keycode key,
+                                                     Uint16 mods)
+{
+	int i;
+
+	for (i = 0; i < emu->nkeybindings; i++) {
+		if (key == (SDL_Keycode) emu->keybindings[i].keysym
+		    && mods == emu->keybindings[i].modifiers)
+			return &emu->keybindings[i];
+	}
+
+	return NULL;
+}
+
+static TilemKeyBinding *sdl_find_key_binding(TilemCalcEmulator *emu,
+                                             const SDL_KeyboardEvent *event)
+{
+	SDL_Keycode sym;
+	SDL_Keycode base;
+	Uint16 mods;
+	Uint16 caps;
+	TilemKeyBinding *kb;
+
+	sym = event->keysym.sym;
+	base = SDL_GetKeyFromScancode(event->keysym.scancode);
+
+	if (sym >= 'A' && sym <= 'Z')
+		sym = sym - 'A' + 'a';
+
+	mods = event->keysym.mod & (KMOD_SHIFT | KMOD_CTRL | KMOD_ALT);
+	caps = event->keysym.mod & KMOD_CAPS;
+
+	if ((mods & KMOD_SHIFT) && sym != base)
+		mods &= ~KMOD_SHIFT;
+
+	if (caps) {
+		kb = sdl_find_key_binding_for_key(emu, sym, mods | KMOD_CAPS);
+		if (kb)
+			return kb;
+	}
+
+	return sdl_find_key_binding_for_key(emu, sym, mods);
+}
 
 /* Table for translating skin-file key number into a scancode. */
 static const int keycode_map[] =
@@ -668,50 +1104,6 @@ static char *sdl_default_skin_path(TilemCalcEmulator *emu)
 	return path;
 }
 
-static SDL_Texture *sdl_texture_from_pixbuf(SDL_Renderer *renderer,
-                                            GdkPixbuf *pixbuf)
-{
-	SDL_Texture *texture;
-	guchar *pixels;
-	byte *rgb;
-	int width, height, rowstride, n_channels, y;
-
-	width = gdk_pixbuf_get_width(pixbuf);
-	height = gdk_pixbuf_get_height(pixbuf);
-	rowstride = gdk_pixbuf_get_rowstride(pixbuf);
-	n_channels = gdk_pixbuf_get_n_channels(pixbuf);
-	pixels = gdk_pixbuf_get_pixels(pixbuf);
-
-	texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24,
-	                            SDL_TEXTUREACCESS_STATIC, width, height);
-	if (!texture)
-		return NULL;
-
-	if (n_channels == 3) {
-		SDL_UpdateTexture(texture, NULL, pixels, rowstride);
-		return texture;
-	}
-
-	/* Convert RGBA to RGB for SDL's RGB24 texture. */
-	rgb = g_new(byte, width * height * 3);
-	for (y = 0; y < height; y++) {
-		const guchar *src = pixels + y * rowstride;
-		byte *dst = rgb + y * width * 3;
-		int x;
-		for (x = 0; x < width; x++) {
-			dst[0] = src[0];
-			dst[1] = src[1];
-			dst[2] = src[2];
-			src += 4;
-			dst += 3;
-		}
-	}
-
-	SDL_UpdateTexture(texture, NULL, rgb, width * 3);
-	g_free(rgb);
-	return texture;
-}
-
 static void sdl_free_skin(TilemSdlUi *ui)
 {
 	if (ui->skin_texture)
@@ -731,8 +1123,6 @@ static void sdl_free_skin(TilemSdlUi *ui)
 static gboolean sdl_load_skin(TilemSdlUi *ui, const char *filename,
                               GError **err)
 {
-	GdkPixbuf *pixbuf;
-
 	sdl_free_skin(ui);
 
 	ui->skin = g_new0(SKIN_INFOS, 1);
@@ -743,9 +1133,9 @@ static gboolean sdl_load_skin(TilemSdlUi *ui, const char *filename,
 		return FALSE;
 	}
 
-	pixbuf = ui->skin->raw;
 	if (ui->renderer) {
-		ui->skin_texture = sdl_texture_from_pixbuf(ui->renderer, pixbuf);
+		ui->skin_texture = tilem_sdl_texture_from_pixbuf(ui->renderer,
+		                                                 ui->skin->raw);
 		if (!ui->skin_texture) {
 			g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_FAILED,
 			            "Unable to create SDL texture for %s", filename);
@@ -830,8 +1220,8 @@ static void sdl_update_layout(TilemSdlUi *ui, int win_w, int win_h)
 	ui->window_height = win_h;
 
 	if (ui->skin) {
-		base_w = gdk_pixbuf_get_width(ui->skin->raw);
-		base_h = gdk_pixbuf_get_height(ui->skin->raw);
+		base_w = ui->skin->width;
+		base_h = ui->skin->height;
 	}
 	else {
 		base_w = ui->lcd_width;
@@ -1186,6 +1576,75 @@ static void press_mouse_key(TilemSdlUi *ui, int key)
 	tilem_calc_emulator_release_key(ui->emu, ui->mouse_key);
 	tilem_calc_emulator_press_key(ui->emu, key);
 	ui->mouse_key = key;
+}
+
+static gboolean sdl_keycode_active(TilemSdlUi *ui, SDL_Scancode scancode)
+{
+	int i;
+
+	for (i = 0; i < 64; i++) {
+		if (ui->keypress_keycodes[i] == (int) scancode)
+			return TRUE;
+	}
+
+	return ui->sequence_keycode == (int) scancode;
+}
+
+static void sdl_handle_keydown(TilemSdlUi *ui, const SDL_KeyboardEvent *event)
+{
+	TilemKeyBinding *kb;
+	SDL_Scancode scancode;
+	int key;
+
+	if (!ui->emu->calc)
+		return;
+
+	if (event->repeat)
+		return;
+
+	scancode = event->keysym.scancode;
+	if (sdl_keycode_active(ui, scancode))
+		return;
+
+	kb = sdl_find_key_binding(ui->emu, event);
+	if (!kb)
+		return;
+
+	if (kb->nscancodes == 1) {
+		key = kb->scancodes[0];
+		if (tilem_calc_emulator_press_or_queue(ui->emu, key))
+			ui->sequence_keycode = (int) scancode;
+		else
+			ui->keypress_keycodes[key] = (int) scancode;
+	}
+	else {
+		tilem_calc_emulator_queue_keys(ui->emu, kb->scancodes,
+		                               kb->nscancodes);
+		ui->sequence_keycode = (int) scancode;
+	}
+}
+
+static void sdl_handle_keyup(TilemSdlUi *ui, const SDL_KeyboardEvent *event)
+{
+	SDL_Scancode scancode;
+	int i;
+
+	if (!ui->emu->calc)
+		return;
+
+	scancode = event->keysym.scancode;
+
+	for (i = 0; i < 64; i++) {
+		if (ui->keypress_keycodes[i] == (int) scancode) {
+			tilem_calc_emulator_release_key(ui->emu, i);
+			ui->keypress_keycodes[i] = 0;
+		}
+	}
+
+	if (ui->sequence_keycode == (int) scancode) {
+		tilem_calc_emulator_release_queued_key(ui->emu);
+		ui->sequence_keycode = 0;
+	}
 }
 
 static void sdl_update_skin_for_calc(TilemSdlUi *ui)
@@ -1589,45 +2048,6 @@ static char *sdl_ensure_extension(const char *filename, const char *format)
 	return g_strdup(filename);
 }
 
-static gboolean sdl_save_screenshot(TilemSdlUi *ui, const char *filename,
-                                    const char *format, int width, int height,
-                                    GError **err)
-{
-	GdkPixbuf *pixbuf;
-	guchar *pixels;
-	int rowstride;
-	gboolean ok;
-
-	if (!ui->emu->calc || !ui->emu->lcd_buffer)
-		return FALSE;
-
-	if (!ui->lcd_palette)
-		sdl_set_palette(ui);
-
-	pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, width, height);
-	if (!pixbuf) {
-		g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_NOMEM,
-		            "Unable to allocate screenshot buffer");
-		return FALSE;
-	}
-
-	pixels = gdk_pixbuf_get_pixels(pixbuf);
-	rowstride = gdk_pixbuf_get_rowstride(pixbuf);
-
-	g_mutex_lock(ui->emu->lcd_mutex);
-	tilem_draw_lcd_image_rgb(ui->emu->lcd_buffer, pixels,
-	                         width, height, rowstride, 3,
-	                         ui->lcd_palette,
-	                         ui->lcd_smooth_scale
-	                         ? TILEM_SCALE_SMOOTH
-	                         : TILEM_SCALE_FAST);
-	g_mutex_unlock(ui->emu->lcd_mutex);
-
-	ok = gdk_pixbuf_save(pixbuf, filename, format, err, NULL);
-	g_object_unref(pixbuf);
-	return ok;
-}
-
 static gboolean sdl_load_initial(TilemSdlUi *ui,
                                  const TilemSdlOptions *opts)
 {
@@ -1704,6 +2124,10 @@ static void sdl_update_after_load(TilemSdlUi *ui)
 	                 "state_file/f", ui->emu->state_file_name,
 	                 NULL);
 	tilem_config_set("recent", "last_model/s", modelname, NULL);
+
+	sdl_keybindings_init(ui->emu, modelname);
+	memset(ui->keypress_keycodes, 0, sizeof(ui->keypress_keycodes));
+	ui->sequence_keycode = 0;
 
 	sdl_update_skin_for_calc(ui);
 	sdl_update_layout(ui, ui->window_width, ui->window_height);
@@ -1868,9 +2292,12 @@ static void sdl_handle_screenshot(TilemSdlUi *ui)
 	format = sdl_guess_image_format(filename, default_format);
 	final_name = sdl_ensure_extension(filename, format);
 	sdl_get_screenshot_size(ui, &width, &height);
+	if (!ui->lcd_palette)
+		sdl_set_palette(ui);
 
-	if (!sdl_save_screenshot(ui, final_name, format,
-	                         width, height, &err)) {
+	if (!tilem_sdl_save_screenshot(ui->emu, ui->lcd_smooth_scale,
+	                               ui->lcd_palette, width, height,
+	                               final_name, format, &err)) {
 		sdl_report_error("Unable to save screenshot", err);
 	}
 
@@ -1918,6 +2345,8 @@ static void sdl_handle_quick_screenshot(TilemSdlUi *ui)
 	g_mkdir_with_parents(folder, 0755);
 	filename = sdl_find_free_filename(folder, "screenshot", format);
 	sdl_get_screenshot_size(ui, &width, &height);
+	if (!ui->lcd_palette)
+		sdl_set_palette(ui);
 
 	if (!filename) {
 		g_free(folder);
@@ -1925,8 +2354,9 @@ static void sdl_handle_quick_screenshot(TilemSdlUi *ui)
 		return;
 	}
 
-	if (!sdl_save_screenshot(ui, filename, format,
-	                         width, height, &err)) {
+	if (!tilem_sdl_save_screenshot(ui->emu, ui->lcd_smooth_scale,
+	                               ui->lcd_palette, width, height,
+	                               filename, format, &err)) {
 		sdl_report_error("Unable to save screenshot", err);
 	}
 
@@ -2010,16 +2440,6 @@ static void sdl_handle_menu_action(TilemSdlUi *ui, TilemSdlMenuAction action,
 	default:
 		break;
 	}
-}
-
-static void sdl_handle_load(TilemSdlUi *ui)
-{
-	sdl_handle_open_calc(ui);
-}
-
-static void sdl_handle_save(TilemSdlUi *ui)
-{
-	sdl_handle_save_calc(ui);
 }
 
 static void sdl_cleanup(TilemSdlUi *ui)
@@ -2116,6 +2536,9 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 	if (ui.emu->calc) {
 		ui.lcd_width = ui.emu->calc->hw.lcdwidth;
 		ui.lcd_height = ui.emu->calc->hw.lcdheight;
+		sdl_keybindings_init(ui.emu, ui.emu->calc->hw.name);
+		memset(ui.keypress_keycodes, 0, sizeof(ui.keypress_keycodes));
+		ui.sequence_keycode = 0;
 		sdl_update_skin_for_calc(&ui);
 	}
 	else {
@@ -2135,8 +2558,8 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 		zoom_factor = 1.0;
 
 	if (ui.skin) {
-		base_w = gdk_pixbuf_get_width(ui.skin->raw);
-		base_h = gdk_pixbuf_get_height(ui.skin->raw);
+		base_w = ui.skin->width;
+		base_h = ui.skin->height;
 	}
 	else {
 		base_w = ui.lcd_width;
@@ -2173,8 +2596,8 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 	}
 
 	if (ui.skin && !ui.skin_texture) {
-		ui.skin_texture = sdl_texture_from_pixbuf(ui.renderer,
-		                                          ui.skin->raw);
+		ui.skin_texture = tilem_sdl_texture_from_pixbuf(ui.renderer,
+		                                                ui.skin->raw);
 		if (!ui.skin_texture)
 			g_printerr("Unable to create SDL texture for skin\n");
 	}
@@ -2264,18 +2687,38 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 			case SDL_KEYDOWN:
 				if (event.key.repeat)
 					break;
-				mods = SDL_GetModState();
-				if (event.key.keysym.sym == SDLK_ESCAPE) {
-					running = FALSE;
+				mods = event.key.keysym.mod;
+				{
+					SDL_Keycode sym = event.key.keysym.sym;
+					if (sym >= 'A' && sym <= 'Z')
+						sym = sym - 'A' + 'a';
+
+					if (ui.menu_visible
+					    && sym == SDLK_ESCAPE) {
+						sdl_menu_hide(&ui);
+						break;
+					}
+					if ((mods & (KMOD_CTRL | KMOD_GUI))
+					    && (sym == SDLK_o || sym == SDLK_s)) {
+						if (mods & KMOD_SHIFT) {
+							if (sym == SDLK_o)
+								sdl_handle_open_calc(&ui);
+							else
+								sdl_handle_save_calc(&ui);
+						}
+						else {
+							if (sym == SDLK_o)
+								sdl_handle_send_file(&ui);
+							else
+								sdl_handle_receive_file(&ui);
+						}
+						break;
+					}
 				}
-				else if ((mods & (KMOD_CTRL | KMOD_GUI))
-				         && event.key.keysym.sym == SDLK_o) {
-					sdl_handle_load(&ui);
-				}
-				else if ((mods & (KMOD_CTRL | KMOD_GUI))
-				         && event.key.keysym.sym == SDLK_s) {
-					sdl_handle_save(&ui);
-				}
+				sdl_handle_keydown(&ui, &event.key);
+				break;
+			case SDL_KEYUP:
+				sdl_handle_keyup(&ui, &event.key);
 				break;
 			default:
 				break;

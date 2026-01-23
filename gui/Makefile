@@ -1,31 +1,31 @@
-prefix = @prefix@
-exec_prefix = @exec_prefix@
-datarootdir = @datarootdir@
-bindir = @bindir@
-datadir = @datadir@
-pkgdatadir = @datadir@/tilem2
-mandir = @mandir@
+prefix = /usr/local
+exec_prefix = ${prefix}
+datarootdir = ${prefix}/share
+bindir = ${exec_prefix}/bin
+datadir = ${datarootdir}
+pkgdatadir = ${datarootdir}/tilem2
+mandir = ${datarootdir}/man
 
-top_builddir = @top_builddir@
-top_srcdir = @top_srcdir@
-srcdir = @srcdir@
-VPATH = @srcdir@
-@SET_MAKE@
+top_builddir = ..
+top_srcdir = ..
+srcdir = .
 
-CC = @CC@
-CFLAGS = @CFLAGS@
-CPPFLAGS = @CPPFLAGS@
-DEFS = @DEFS@
-GUI_LDFLAGS = @GUI_LDFLAGS@
-INSTALL = @INSTALL@
-INSTALL_PROGRAM = @INSTALL_PROGRAM@
-LDFLAGS = @LDFLAGS@
-LIBS = @LIBS@
-SHELL = @SHELL@
-WINDRES = @WINDRES@
 
-GTK_CFLAGS = @GTK_CFLAGS@
-GTK_LIBS = @GTK_LIBS@
+
+CC = clang
+CFLAGS = -g -O2 -W -Wall -Wwrite-strings
+CPPFLAGS = 
+DEFS = -DHAVE_CONFIG_H
+GUI_LDFLAGS = 
+INSTALL = /usr/bin/install -c
+INSTALL_PROGRAM = ${INSTALL}
+LDFLAGS = 
+LIBS = 
+SHELL = /nix/store/yi3x6xpilh0bq0bgb61imy6gpv8b1la4-bash-5.3p3/bin/bash
+WINDRES = 
+
+GTK_CFLAGS = 
+GTK_LIBS = 
 
 SDL2_CFLAGS = $(shell pkg-config --cflags sdl2)
 SDL2_LIBS = $(shell pkg-config --libs sdl2)
@@ -33,8 +33,8 @@ SDL2_LIBS = $(shell pkg-config --libs sdl2)
 SDL2_TTF_CFLAGS = $(shell pkg-config --cflags SDL2_ttf)
 SDL2_TTF_LIBS = $(shell pkg-config --libs SDL2_ttf)
 
-TICALCS_CFLAGS = @TICALCS_CFLAGS@
-TICALCS_LIBS = @TICALCS_LIBS@
+TICALCS_CFLAGS = 
+TICALCS_LIBS = 
 
 TILEMCORE_CFLAGS = -I$(top_srcdir)/emu
 TILEMCORE_LIBS = -L$(top_builddir)/emu -ltilemcore
@@ -45,7 +45,7 @@ TILEMDB_LIBS = -L$(top_builddir)/db -ltilemdb
 DEF_SHARE_DIR = -DSHARE_DIR=\"$(pkgdatadir)\" \
 	-DUNINSTALLED_SHARE_DIR=\"$(top_srcdir)/data\"
 
-gui_extra_objects = @gui_extra_objects@
+gui_extra_objects = 
 
 objects = tilem2.o \
 	address.o \
@@ -64,6 +64,8 @@ objects = tilem2.o \
 	files.o \
 	fixedtreeview.o \
 	gifencod.o \
+	headless_script.o \
+	trace.o \
 	icons.o \
 	keybindings.o \
 	keypaddlg.o \
@@ -88,7 +90,8 @@ objects = tilem2.o \
 
 libs = $(TILEMDB_LIBS) $(TILEMCORE_LIBS) $(GTK_LIBS) $(SDL2_LIBS) $(SDL2_TTF_LIBS) $(TICALCS_LIBS) $(LIBS)
 
-compile = $(CC) -I$(top_builddir) -I$(srcdir) $(CFLAGS) $(CPPFLAGS) $(DEFS) \
+compile = $(CC) -I$(top_builddir) -I$(srcdir) -I$(top_srcdir)/headless \
+	$(CFLAGS) $(CPPFLAGS) $(DEFS) \
 	$(TILEMCORE_CFLAGS) $(TILEMDB_CFLAGS) \
 	$(GTK_CFLAGS) $(SDL2_CFLAGS) $(SDL2_TTF_CFLAGS) $(TICALCS_CFLAGS)
 
@@ -98,11 +101,11 @@ common_headers = ../config.h ../emu/tilem.h ../db/tilemdb.h \
 	gui.h emulator.h debugger.h emuwin.h skinops.h animation.h \
 	gtk-compat.h msgbox.h fixedtreeview.h
 
-all: tilem2@EXEEXT@
+all: tilem2
 
 #Main emulator GUI
-tilem2@EXEEXT@: $(objects) ../emu/libtilemcore.a
-	$(link) -o tilem2@EXEEXT@ $(objects) $(libs)
+tilem2: $(objects) ../emu/libtilemcore.a
+	$(link) -o tilem2 $(objects) $(libs)
 
 tilem2.o: tilem2.c icons.h files.h $(common_headers)
 	$(compile) -c $(srcdir)/tilem2.c
@@ -238,6 +241,13 @@ sendfile.o: sendfile.c emucore.h $(common_headers)
 filedlg.o: filedlg.c filedlg.h
 	$(compile) -c $(srcdir)/filedlg.c
 
+# Headless script parser (shared with headless build)
+headless_script.o: $(top_srcdir)/headless/script.c $(top_srcdir)/headless/script.h
+	$(compile) -c $(top_srcdir)/headless/script.c -o headless_script.o
+
+trace.o: $(top_srcdir)/headless/trace.c $(top_srcdir)/headless/trace.h
+	$(compile) -c $(top_srcdir)/headless/trace.c -o trace.o
+
 # Fixed-width tree view
 fixedtreeview.o: fixedtreeview.c fixedtreeview.h
 	$(compile) -c $(srcdir)/fixedtreeview.c
@@ -252,8 +262,8 @@ charmap.o: charmap.c charmap.h ../emu/tilem.h
 
 # Windows resource file
 tilem2rc.o: tilem2.rc
-	major=`echo "@PACKAGE_VERSION@" | sed 's/\..*//'` ; \
-	minor=`echo "@PACKAGE_VERSION@" | sed 's/.*\.//;s/[^0-9].*//'` ; \
+	major=`echo "2.0" | sed 's/\..*//'` ; \
+	minor=`echo "2.0" | sed 's/.*\.//;s/[^0-9].*//'` ; \
 	svnver=`svnversion "$(top_srcdir)" 2>/dev/null | sed 's/[^0-9].*//'` ; \
 	[ -n "$$svnver" ] || svnver=0 ; \
 	$(WINDRES) -DBUILD_VERSION=$$major,$$minor,0,$$svnver tilem2.rc tilem2rc.o
@@ -261,16 +271,16 @@ tilem2rc.o: tilem2.rc
 tilem2.rc: tilem2.rc.in $(top_builddir)/config.status
 	cd $(top_builddir) && $(SHELL) ./config.status gui/tilem2.rc
 
-install: tilem2@EXEEXT@
+install: tilem2
 	$(INSTALL) -d -m 755 $(DESTDIR)$(bindir)
-	$(INSTALL_PROGRAM) -m 755 tilem2@EXEEXT@ $(DESTDIR)$(bindir)
+	$(INSTALL_PROGRAM) -m 755 tilem2 $(DESTDIR)$(bindir)
 
 uninstall:
-	rm -f $(DESTDIR)$(bindir)/tilem2@EXEEXT@
+	rm -f $(DESTDIR)$(bindir)/tilem2
 
 clean:
 	rm -f *.o
-	rm -f tilem2@EXEEXT@
+	rm -f tilem2
 
 Makefile: Makefile.in $(top_builddir)/config.status
 	cd $(top_builddir) && $(SHELL) ./config.status

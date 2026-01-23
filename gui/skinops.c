@@ -36,6 +36,11 @@ contra-sh :
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <errno.h>
+
+#include <glib.h>
+#include <glib/gstdio.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
+
 #include "skinops.h"
 
 #include <gtk/gtk.h>
@@ -296,4 +301,3 @@ int skin_unload(SKIN_INFOS *si)
 
 	return 0;
 }
-

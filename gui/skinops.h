@@ -43,7 +43,8 @@ contra-sh :
 #endif
 
 #include <stdint.h>
-#include <gdk-pixbuf/gdk-pixbuf.h>
+
+typedef struct _GdkPixbuf GdkPixbuf;
 
 
 /***************/
