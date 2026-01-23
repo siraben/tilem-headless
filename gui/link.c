@@ -1187,6 +1187,77 @@ void tilem_link_receive_file(TilemCalcEmulator *emu,
 	g_slist_free(l);
 }
 
+struct receiveallinfo {
+	struct dirlistinfo *dl;
+	struct TilemReceiveFileInfo *rf;
+};
+
+static gboolean receive_all_main(TilemCalcEmulator *emu, gpointer data)
+{
+	struct receiveallinfo *ra = data;
+
+	if (!get_dirlist_main(emu, ra->dl)) {
+		if (ra->dl->error_message)
+			ra->rf->error_message = g_strdup(ra->dl->error_message);
+		return FALSE;
+	}
+
+	if (!ra->dl->list) {
+		ra->rf->error_message = g_strdup("No variables to receive.");
+		return FALSE;
+	}
+
+	ra->rf->entries = ra->dl->list;
+	ra->dl->list = NULL;
+
+	return receive_files_main(emu, ra->rf);
+}
+
+static void receive_all_finished(TilemCalcEmulator *emu, gpointer data,
+                                 gboolean cancelled)
+{
+	struct receiveallinfo *ra = data;
+	GSList *l;
+
+	if (ra->dl->list) {
+		for (l = ra->dl->list; l; l = l->next)
+			tilem_var_entry_free(l->data);
+		g_slist_free(ra->dl->list);
+	}
+
+	g_free(ra->dl->error_message);
+	g_slice_free(struct dirlistinfo, ra->dl);
+
+	receive_files_finished(emu, ra->rf, cancelled);
+	g_slice_free(struct receiveallinfo, ra);
+}
+
+void tilem_link_receive_all(TilemCalcEmulator *emu,
+                            const char *destination)
+{
+	struct receiveallinfo *ra;
+	const char *p;
+	gboolean output_tig = FALSE;
+
+	g_return_if_fail(emu != NULL);
+	g_return_if_fail(emu->calc != NULL);
+	g_return_if_fail(destination != NULL);
+
+	p = strrchr(destination, '.');
+	if (p && (!g_ascii_strcasecmp(p, ".tig")
+	          || !g_ascii_strcasecmp(p, ".zip")))
+		output_tig = TRUE;
+
+	ra = g_slice_new0(struct receiveallinfo);
+	ra->dl = g_slice_new0(struct dirlistinfo);
+	ra->rf = g_slice_new0(struct TilemReceiveFileInfo);
+	ra->rf->destination = g_strdup(destination);
+	ra->rf->output_tig = output_tig;
+
+	tilem_calc_emulator_begin(emu, &receive_all_main,
+	                          &receive_all_finished, ra);
+}
+
 /**************** Receive matching files ****************/
 
 struct recmatchinfo {

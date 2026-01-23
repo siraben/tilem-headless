@@ -29,6 +29,7 @@
 
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <ticalcs.h>
 #include <tilem.h>
 #include <scancodes.h>
@@ -37,6 +38,7 @@
 #include "files.h"
 #include "gui.h"
 #include "skinops.h"
+#include "ti81prg.h"
 
 #define SDL_LCD_GAMMA 2.2
 #define SDL_FRAME_DELAY_MS 16
@@ -80,27 +82,48 @@ typedef struct {
 } TilemSdlUi;
 
 typedef enum {
-	SDL_MENU_LOAD_ROM = 0,
-	SDL_MENU_LOAD_STATE,
-	SDL_MENU_SAVE_STATE,
-	SDL_MENU_SAVE_STATE_AS,
+	SDL_MENU_NONE = 0,
+	SDL_MENU_SEND_FILE,
+	SDL_MENU_RECEIVE_FILE,
+	SDL_MENU_OPEN_CALC,
+	SDL_MENU_SAVE_CALC,
+	SDL_MENU_REVERT_CALC,
 	SDL_MENU_RESET,
+	SDL_MENU_SCREENSHOT,
+	SDL_MENU_QUICK_SCREENSHOT,
+	SDL_MENU_PREFERENCES,
+	SDL_MENU_ABOUT,
 	SDL_MENU_QUIT
 } TilemSdlMenuAction;
 
 typedef struct {
 	const char *label;
 	TilemSdlMenuAction action;
+	gboolean separator;
 } TilemSdlMenuItem;
 
 static const TilemSdlMenuItem sdl_menu_items[] = {
-	{ "Load ROM...", SDL_MENU_LOAD_ROM },
-	{ "Load State...", SDL_MENU_LOAD_STATE },
-	{ "Save State", SDL_MENU_SAVE_STATE },
-	{ "Save State As...", SDL_MENU_SAVE_STATE_AS },
-	{ "Reset", SDL_MENU_RESET },
-	{ "Quit", SDL_MENU_QUIT }
+	{ "Send File...", SDL_MENU_SEND_FILE, FALSE },
+	{ "Receive File...", SDL_MENU_RECEIVE_FILE, FALSE },
+	{ NULL, SDL_MENU_NONE, TRUE },
+	{ "Open Calculator...", SDL_MENU_OPEN_CALC, FALSE },
+	{ "Save Calculator", SDL_MENU_SAVE_CALC, FALSE },
+	{ "Revert Calculator State", SDL_MENU_REVERT_CALC, FALSE },
+	{ "Reset Calculator", SDL_MENU_RESET, FALSE },
+	{ NULL, SDL_MENU_NONE, TRUE },
+	{ "Screenshot...", SDL_MENU_SCREENSHOT, FALSE },
+	{ "Quick Screenshot", SDL_MENU_QUICK_SCREENSHOT, FALSE },
+	{ NULL, SDL_MENU_NONE, TRUE },
+	{ "Preferences", SDL_MENU_PREFERENCES, FALSE },
+	{ NULL, SDL_MENU_NONE, TRUE },
+	{ "About", SDL_MENU_ABOUT, FALSE },
+	{ "Quit", SDL_MENU_QUIT, FALSE }
 };
+
+#define SDL_SCREENSHOT_DEFAULT_WIDTH_96 192
+#define SDL_SCREENSHOT_DEFAULT_HEIGHT_96 128
+#define SDL_SCREENSHOT_DEFAULT_WIDTH_128 256
+#define SDL_SCREENSHOT_DEFAULT_HEIGHT_128 128
 
 static const unsigned char sdl_font8x8_basic[128][8] = {
 	{ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 }, /* 0x00 */
@@ -866,6 +889,9 @@ static int sdl_menu_text_width(TilemSdlUi *ui, const char *text)
 	int width = 0;
 	int height = 0;
 
+	if (!text)
+		return 0;
+
 	if (ui->menu_font) {
 		if (TTF_SizeUTF8(ui->menu_font, text, &width, &height) == 0)
 			return width;
@@ -915,6 +941,8 @@ static void sdl_menu_show(TilemSdlUi *ui, int x, int y)
 	int menu_h;
 
 	for (i = 0; i < G_N_ELEMENTS(sdl_menu_items); i++) {
+		if (sdl_menu_items[i].separator)
+			continue;
 		text_w = sdl_menu_text_width(ui, sdl_menu_items[i].label);
 		if (text_w > maxw)
 			maxw = text_w;
@@ -967,6 +995,9 @@ static int sdl_menu_hit_test(TilemSdlUi *ui, int x, int y)
 	if (index < 0 || index >= (int) G_N_ELEMENTS(sdl_menu_items))
 		return -1;
 
+	if (sdl_menu_items[index].separator)
+		return -1;
+
 	return index;
 }
 
@@ -1005,6 +1036,19 @@ static void sdl_render_menu(TilemSdlUi *ui)
 		item_rect.w = ui->menu_width;
 		item_rect.h = item_h;
 
+		if (sdl_menu_items[i].separator) {
+			SDL_SetRenderDrawColor(ui->renderer, border_color.r,
+			                       border_color.g,
+			                       border_color.b,
+			                       border_color.a);
+			SDL_RenderDrawLine(ui->renderer,
+			                   item_rect.x + SDL_MENU_PADDING,
+			                   item_rect.y + item_rect.h / 2,
+			                   item_rect.x + item_rect.w - SDL_MENU_PADDING,
+			                   item_rect.y + item_rect.h / 2);
+			continue;
+		}
+
 		if ((int) i == ui->menu_selected) {
 			SDL_SetRenderDrawColor(ui->renderer, highlight_color.r,
 			                       highlight_color.g,
@@ -1026,7 +1070,7 @@ static void sdl_render_lcd(TilemSdlUi *ui)
 	SDL_Color text_color = { 200, 200, 200, 255 };
 	SDL_Color sub_color = { 160, 160, 160, 255 };
 	const char *line1 = "No ROM loaded";
-	const char *line2 = "Right-click to load";
+	const char *line2 = "Right-click to open";
 	int text_w1;
 	int text_w2;
 	int x1;
@@ -1252,6 +1296,102 @@ static char *sdl_pick_state_save_file(TilemSdlUi *ui)
 	return filename;
 }
 
+static char *sdl_pick_send_file(TilemSdlUi *ui)
+{
+	char *dir = NULL;
+	char *filename;
+	gboolean used_native = FALSE;
+
+	if (!ui->emu->calc)
+		return NULL;
+
+	tilem_config_get("upload", "sendfile_recentdir/f", &dir, NULL);
+	if (!dir)
+		dir = g_get_current_dir();
+
+	filename = sdl_native_file_dialog("Send File", dir, NULL, FALSE,
+	                                  &used_native);
+	g_free(dir);
+
+	if (!filename && !used_native) {
+		sdl_show_message(ui, "Send File",
+		                 "No native file picker available.");
+	}
+
+	if (filename) {
+		dir = g_path_get_dirname(filename);
+		tilem_config_set("upload", "sendfile_recentdir/f", dir, NULL);
+		g_free(dir);
+	}
+
+	return filename;
+}
+
+static char *sdl_pick_receive_file(TilemSdlUi *ui)
+{
+	char *dir = NULL;
+	char *filename;
+	gboolean used_native = FALSE;
+
+	if (!ui->emu->calc)
+		return NULL;
+
+	tilem_config_get("download", "receivefile_recentdir/f", &dir, NULL);
+	if (!dir)
+		dir = g_get_current_dir();
+
+	filename = sdl_native_file_dialog("Receive File", dir,
+	                                  "calculator.tig", TRUE,
+	                                  &used_native);
+	g_free(dir);
+
+	if (!filename && !used_native) {
+		sdl_show_message(ui, "Receive File",
+		                 "No native file picker available.");
+	}
+
+	if (filename) {
+		dir = g_path_get_dirname(filename);
+		tilem_config_set("download", "receivefile_recentdir/f", dir,
+		                 NULL);
+		g_free(dir);
+	}
+
+	return filename;
+}
+
+static char *sdl_pick_screenshot_file(TilemSdlUi *ui)
+{
+	char *dir = NULL;
+	char *filename;
+	gboolean used_native = FALSE;
+
+	if (!ui->emu->calc)
+		return NULL;
+
+	tilem_config_get("screenshot", "directory/f", &dir, NULL);
+	if (!dir)
+		dir = g_get_current_dir();
+
+	filename = sdl_native_file_dialog("Save Screenshot", dir,
+	                                  "screenshot.png", TRUE,
+	                                  &used_native);
+	g_free(dir);
+
+	if (!filename && !used_native) {
+		sdl_show_message(ui, "Screenshot",
+		                 "No native file picker available.");
+	}
+
+	if (filename) {
+		dir = g_path_get_dirname(filename);
+		tilem_config_set("screenshot", "directory/f", dir, NULL);
+		g_free(dir);
+	}
+
+	return filename;
+}
+
 static gboolean sdl_save_state_to(TilemSdlUi *ui, const char *savname,
                                   GError **err)
 {
@@ -1333,6 +1473,159 @@ static gboolean sdl_save_state_to(TilemSdlUi *ui, const char *savname,
 	}
 
 	return status;
+}
+
+static char *sdl_find_free_filename(const char *folder,
+                                    const char *basename,
+                                    const char *extension)
+{
+	int i;
+	char *filename;
+	char *prefix;
+	const char *ext = extension;
+
+	if (ext && ext[0] == '.')
+		ext++;
+	if (!ext || !*ext)
+		ext = "png";
+
+	if (folder)
+		prefix = g_build_filename(folder, basename, NULL);
+	else
+		prefix = g_strdup(basename);
+
+	for (i = 0; i < 999; i++) {
+		filename = g_strdup_printf("%s%03d.%s", prefix, i, ext);
+		if (!g_file_test(filename, G_FILE_TEST_IS_REGULAR)) {
+			g_free(prefix);
+			return filename;
+		}
+		g_free(filename);
+	}
+
+	g_free(prefix);
+	return NULL;
+}
+
+static gboolean sdl_is_wide_screen(TilemSdlUi *ui)
+{
+	if (!ui->emu->calc)
+		return FALSE;
+	return (ui->emu->calc->hw.lcdwidth == 128);
+}
+
+static void sdl_get_screenshot_size(TilemSdlUi *ui, int *out_w, int *out_h)
+{
+	int w96 = 0;
+	int h96 = 0;
+	int w128 = 0;
+	int h128 = 0;
+
+	tilem_config_get("screenshot",
+	                 "width_96x64/i", &w96,
+	                 "height_96x64/i", &h96,
+	                 "width_128x64/i", &w128,
+	                 "height_128x64/i", &h128,
+	                 NULL);
+
+	if (sdl_is_wide_screen(ui)) {
+		*out_w = (w128 > 0 ? w128 : SDL_SCREENSHOT_DEFAULT_WIDTH_128);
+		*out_h = (h128 > 0 ? h128 : SDL_SCREENSHOT_DEFAULT_HEIGHT_128);
+	}
+	else {
+		*out_w = (w96 > 0 ? w96 : SDL_SCREENSHOT_DEFAULT_WIDTH_96);
+		*out_h = (h96 > 0 ? h96 : SDL_SCREENSHOT_DEFAULT_HEIGHT_96);
+	}
+}
+
+static char *sdl_guess_image_format(const char *filename,
+                                    const char *default_format)
+{
+	const char *dot;
+	const char *sep;
+	const char *fmt;
+	char *lower;
+
+	if (!filename) {
+		fmt = default_format ? default_format : "png";
+		if (fmt[0] == '.')
+			fmt++;
+		return g_ascii_strdown(fmt, -1);
+	}
+
+	fmt = default_format ? default_format : "png";
+	if (fmt[0] == '.')
+		fmt++;
+
+	dot = strrchr(filename, '.');
+	sep = strrchr(filename, G_DIR_SEPARATOR);
+	if (!dot || (sep && dot < sep) || !dot[1]) {
+		return g_ascii_strdown(fmt, -1);
+	}
+
+	lower = g_ascii_strdown(dot + 1, -1);
+	return lower;
+}
+
+static char *sdl_ensure_extension(const char *filename, const char *format)
+{
+	const char *dot;
+	const char *sep;
+	const char *fmt = format;
+
+	if (!filename)
+		return NULL;
+
+	if (fmt && fmt[0] == '.')
+		fmt++;
+	if (!fmt || !*fmt)
+		fmt = "png";
+
+	dot = strrchr(filename, '.');
+	sep = strrchr(filename, G_DIR_SEPARATOR);
+	if (!dot || (sep && dot < sep))
+		return g_strdup_printf("%s.%s", filename, fmt);
+
+	return g_strdup(filename);
+}
+
+static gboolean sdl_save_screenshot(TilemSdlUi *ui, const char *filename,
+                                    const char *format, int width, int height,
+                                    GError **err)
+{
+	GdkPixbuf *pixbuf;
+	guchar *pixels;
+	int rowstride;
+	gboolean ok;
+
+	if (!ui->emu->calc || !ui->emu->lcd_buffer)
+		return FALSE;
+
+	if (!ui->lcd_palette)
+		sdl_set_palette(ui);
+
+	pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, width, height);
+	if (!pixbuf) {
+		g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_NOMEM,
+		            "Unable to allocate screenshot buffer");
+		return FALSE;
+	}
+
+	pixels = gdk_pixbuf_get_pixels(pixbuf);
+	rowstride = gdk_pixbuf_get_rowstride(pixbuf);
+
+	g_mutex_lock(ui->emu->lcd_mutex);
+	tilem_draw_lcd_image_rgb(ui->emu->lcd_buffer, pixels,
+	                         width, height, rowstride, 3,
+	                         ui->lcd_palette,
+	                         ui->lcd_smooth_scale
+	                         ? TILEM_SCALE_SMOOTH
+	                         : TILEM_SCALE_FAST);
+	g_mutex_unlock(ui->emu->lcd_mutex);
+
+	ok = gdk_pixbuf_save(pixbuf, filename, format, err, NULL);
+	g_object_unref(pixbuf);
+	return ok;
 }
 
 static gboolean sdl_load_initial(TilemSdlUi *ui,
@@ -1440,31 +1733,40 @@ static void sdl_handle_load_rom(TilemSdlUi *ui)
 	g_free(state);
 }
 
-static void sdl_handle_load_state(TilemSdlUi *ui)
+static void sdl_handle_send_file(TilemSdlUi *ui)
 {
-	GError *err = NULL;
-	char *state;
+	char *filename;
 
-	if (!ui->emu->rom_file_name) {
-		sdl_show_message(ui, "Load State",
-		                 "No ROM loaded yet.");
+	if (!ui->emu->calc) {
+		sdl_show_message(ui, "Send File",
+		                 "No calculator loaded yet.");
 		return;
 	}
 
-	state = sdl_pick_state_file(ui, "Open State");
-	if (!state)
+	filename = sdl_pick_send_file(ui);
+	if (!filename)
 		return;
 
-	if (!tilem_calc_emulator_load_state(ui->emu, ui->emu->rom_file_name,
-	                                    state, 0, &err)) {
-		sdl_report_error("Unable to load calculator state", err);
-		g_free(state);
+	tilem_link_send_file(ui->emu, filename, TI81_SLOT_AUTO, TRUE, TRUE);
+	g_free(filename);
+}
+
+static void sdl_handle_receive_file(TilemSdlUi *ui)
+{
+	char *filename;
+
+	if (!ui->emu->calc) {
+		sdl_show_message(ui, "Receive File",
+		                 "No calculator loaded yet.");
 		return;
 	}
 
-	sdl_update_after_load(ui);
-	sdl_start_emulation(ui);
-	g_free(state);
+	filename = sdl_pick_receive_file(ui);
+	if (!filename)
+		return;
+
+	tilem_link_receive_all(ui->emu, filename);
+	g_free(filename);
 }
 
 static void sdl_handle_save_state(TilemSdlUi *ui)
@@ -1509,24 +1811,198 @@ static void sdl_handle_save_state_as(TilemSdlUi *ui)
 	g_free(filename);
 }
 
+static void sdl_handle_open_calc(TilemSdlUi *ui)
+{
+	sdl_handle_load_rom(ui);
+}
+
+static void sdl_handle_save_calc(TilemSdlUi *ui)
+{
+	if (!ui->emu->calc)
+		return;
+
+	if (!ui->emu->state_file_name) {
+		sdl_handle_save_state_as(ui);
+		return;
+	}
+
+	sdl_handle_save_state(ui);
+}
+
+static void sdl_handle_revert_calc(TilemSdlUi *ui)
+{
+	GError *err = NULL;
+
+	if (!ui->emu->calc || !ui->emu->rom_file_name
+	    || !ui->emu->state_file_name) {
+		sdl_show_message(ui, "Revert Calculator State",
+		                 "No saved state available.");
+		return;
+	}
+
+	if (!tilem_calc_emulator_revert_state(ui->emu, &err))
+		sdl_report_error("Unable to load calculator state", err);
+}
+
+static void sdl_handle_screenshot(TilemSdlUi *ui)
+{
+	GError *err = NULL;
+	char *filename;
+	char *default_format = NULL;
+	char *format;
+	char *final_name;
+	int width;
+	int height;
+
+	if (!ui->emu->calc) {
+		sdl_show_message(ui, "Screenshot",
+		                 "No calculator loaded yet.");
+		return;
+	}
+
+	filename = sdl_pick_screenshot_file(ui);
+	if (!filename)
+		return;
+
+	tilem_config_get("screenshot", "format/s", &default_format, NULL);
+	format = sdl_guess_image_format(filename, default_format);
+	final_name = sdl_ensure_extension(filename, format);
+	sdl_get_screenshot_size(ui, &width, &height);
+
+	if (!sdl_save_screenshot(ui, final_name, format,
+	                         width, height, &err)) {
+		sdl_report_error("Unable to save screenshot", err);
+	}
+
+	g_free(default_format);
+	g_free(format);
+	g_free(final_name);
+	g_free(filename);
+}
+
+static void sdl_handle_quick_screenshot(TilemSdlUi *ui)
+{
+	GError *err = NULL;
+	char *folder = NULL;
+	char *format = NULL;
+	char *filename;
+	int width;
+	int height;
+
+	if (!ui->emu->calc) {
+		sdl_show_message(ui, "Quick Screenshot",
+		                 "No calculator loaded yet.");
+		return;
+	}
+
+	tilem_config_get("screenshot",
+	                 "directory/f", &folder,
+	                 "format/s", &format,
+	                 NULL);
+
+	if (!folder)
+		folder = get_config_file_path("screenshots", NULL);
+	if (!format)
+		format = g_strdup("png");
+	else {
+		char *lower = g_ascii_strdown(format, -1);
+		g_free(format);
+		format = lower;
+		if (format[0] == '.') {
+			char *stripped = g_strdup(format + 1);
+			g_free(format);
+			format = stripped;
+		}
+	}
+
+	g_mkdir_with_parents(folder, 0755);
+	filename = sdl_find_free_filename(folder, "screenshot", format);
+	sdl_get_screenshot_size(ui, &width, &height);
+
+	if (!filename) {
+		g_free(folder);
+		g_free(format);
+		return;
+	}
+
+	if (!sdl_save_screenshot(ui, filename, format,
+	                         width, height, &err)) {
+		sdl_report_error("Unable to save screenshot", err);
+	}
+
+	g_free(filename);
+	g_free(folder);
+	g_free(format);
+}
+
+static void sdl_handle_preferences(TilemSdlUi *ui)
+{
+	char *config_path;
+	char *message;
+
+	config_path = get_config_file_path("config.ini", NULL);
+	message = g_strdup_printf("Preferences are stored in:\n%s",
+	                          config_path);
+	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION,
+	                         "Preferences", message,
+	                         ui ? ui->window : NULL);
+	g_free(config_path);
+	g_free(message);
+}
+
+static void sdl_handle_about(TilemSdlUi *ui)
+{
+	const char *title = "TilEm II";
+	char *body = g_strdup_printf(
+		"TilEm II %s\n"
+		"\n"
+		"TilEm is a TI Linux Emulator.\n"
+		"It emulates all current Z80 models:\n"
+		"TI73, TI76, TI81, TI82, TI83(+)(SE),\n"
+		"TI84+(SE), TI85 and TI86.\n"
+		"\n"
+		"http://lpg.ticalc.org/prj_tilem/",
+		PACKAGE_VERSION);
+
+	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION,
+	                         title, body,
+	                         ui ? ui->window : NULL);
+	g_free(body);
+}
+
 static void sdl_handle_menu_action(TilemSdlUi *ui, TilemSdlMenuAction action,
                                    gboolean *running)
 {
 	switch (action) {
-	case SDL_MENU_LOAD_ROM:
-		sdl_handle_load_rom(ui);
+	case SDL_MENU_SEND_FILE:
+		sdl_handle_send_file(ui);
 		break;
-	case SDL_MENU_LOAD_STATE:
-		sdl_handle_load_state(ui);
+	case SDL_MENU_RECEIVE_FILE:
+		sdl_handle_receive_file(ui);
 		break;
-	case SDL_MENU_SAVE_STATE:
-		sdl_handle_save_state(ui);
+	case SDL_MENU_OPEN_CALC:
+		sdl_handle_open_calc(ui);
 		break;
-	case SDL_MENU_SAVE_STATE_AS:
-		sdl_handle_save_state_as(ui);
+	case SDL_MENU_SAVE_CALC:
+		sdl_handle_save_calc(ui);
+		break;
+	case SDL_MENU_REVERT_CALC:
+		sdl_handle_revert_calc(ui);
 		break;
 	case SDL_MENU_RESET:
 		tilem_calc_emulator_reset(ui->emu);
+		break;
+	case SDL_MENU_SCREENSHOT:
+		sdl_handle_screenshot(ui);
+		break;
+	case SDL_MENU_QUICK_SCREENSHOT:
+		sdl_handle_quick_screenshot(ui);
+		break;
+	case SDL_MENU_PREFERENCES:
+		sdl_handle_preferences(ui);
+		break;
+	case SDL_MENU_ABOUT:
+		sdl_handle_about(ui);
 		break;
 	case SDL_MENU_QUIT:
 		*running = FALSE;
@@ -1538,12 +2014,12 @@ static void sdl_handle_menu_action(TilemSdlUi *ui, TilemSdlMenuAction action,
 
 static void sdl_handle_load(TilemSdlUi *ui)
 {
-	sdl_handle_load_rom(ui);
+	sdl_handle_open_calc(ui);
 }
 
 static void sdl_handle_save(TilemSdlUi *ui)
 {
-	sdl_handle_save_state(ui);
+	sdl_handle_save_calc(ui);
 }
 
 static void sdl_cleanup(TilemSdlUi *ui)
