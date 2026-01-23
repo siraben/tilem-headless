@@ -389,6 +389,188 @@ static char *sdl_find_font_path(void)
 	return NULL;
 }
 
+static char *sdl_spawn_capture(char **argv)
+{
+	char *out = NULL;
+	char *err = NULL;
+	int status = 0;
+
+	if (!g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL,
+	                  &out, &err, &status, NULL)) {
+		g_free(out);
+		g_free(err);
+		return NULL;
+	}
+
+	if (!g_spawn_check_exit_status(status, NULL)) {
+		g_free(out);
+		g_free(err);
+		return NULL;
+	}
+
+	if (!out || !*out) {
+		g_free(out);
+		g_free(err);
+		return NULL;
+	}
+
+	g_strchomp(out);
+	g_free(err);
+	return out;
+}
+
+static char *sdl_applescript_escape(const char *str)
+{
+	GString *out;
+	const char *p;
+
+	if (!str)
+		return g_strdup("");
+
+	out = g_string_new(NULL);
+	for (p = str; *p; p++) {
+		if (*p == '\\' || *p == '"')
+			g_string_append_c(out, '\\');
+		g_string_append_c(out, *p);
+	}
+
+	return g_string_free(out, FALSE);
+}
+
+static char *sdl_native_file_dialog(const char *title,
+                                    const char *suggest_dir,
+                                    const char *suggest_name,
+                                    gboolean save,
+                                    gboolean *used_native)
+{
+	if (used_native)
+		*used_native = FALSE;
+
+#ifdef __APPLE__
+	{
+		char *escaped_title = sdl_applescript_escape(title);
+		char *escaped_dir = sdl_applescript_escape(suggest_dir);
+		char *escaped_name = sdl_applescript_escape(suggest_name);
+		char *script;
+		char *argv[4];
+		char *result;
+		GString *cmd = g_string_new(NULL);
+
+		if (save)
+			g_string_append_printf(cmd,
+			                       "choose file name with prompt \"%s\"",
+			                       escaped_title);
+		else
+			g_string_append_printf(cmd,
+			                       "choose file with prompt \"%s\"",
+			                       escaped_title);
+
+		if (escaped_dir && *escaped_dir) {
+			g_string_append_printf(cmd,
+			                       " default location POSIX file \"%s\"",
+			                       escaped_dir);
+		}
+
+		if (save && escaped_name && *escaped_name) {
+			g_string_append_printf(cmd,
+			                       " default name \"%s\"",
+			                       escaped_name);
+		}
+
+		script = g_strdup_printf("POSIX path of (%s)", cmd->str);
+
+		argv[0] = (char *)"osascript";
+		argv[1] = (char *)"-e";
+		argv[2] = script;
+		argv[3] = NULL;
+
+		if (used_native)
+			*used_native = TRUE;
+		result = sdl_spawn_capture(argv);
+
+		g_string_free(cmd, TRUE);
+		g_free(script);
+		g_free(escaped_title);
+		g_free(escaped_dir);
+		g_free(escaped_name);
+		return result;
+	}
+#elif defined(__linux__)
+	{
+		char *prog = g_find_program_in_path("zenity");
+		char *result = NULL;
+		char *filename = NULL;
+
+		if (prog) {
+			GPtrArray *argv = g_ptr_array_new();
+
+			g_ptr_array_add(argv, prog);
+			g_ptr_array_add(argv, (char *)"--file-selection");
+			if (save)
+				g_ptr_array_add(argv, (char *)"--save");
+			g_ptr_array_add(argv, (char *)"--title");
+			g_ptr_array_add(argv, (char *)title);
+			if (suggest_dir && *suggest_dir) {
+				if (save && suggest_name)
+					filename = g_build_filename(suggest_dir,
+					                            suggest_name, NULL);
+				else
+					filename = g_strconcat(suggest_dir,
+					                       G_DIR_SEPARATOR_S, NULL);
+				g_ptr_array_add(argv, (char *)"--filename");
+				g_ptr_array_add(argv, filename);
+			}
+			g_ptr_array_add(argv, NULL);
+
+			if (used_native)
+				*used_native = TRUE;
+			result = sdl_spawn_capture((char **) argv->pdata);
+
+			g_ptr_array_free(argv, TRUE);
+			g_free(prog);
+			g_free(filename);
+			return result;
+		}
+
+		prog = g_find_program_in_path("kdialog");
+		if (prog) {
+			char *argv[6];
+			char *path = NULL;
+			int i = 0;
+
+			argv[i++] = prog;
+			if (save)
+				argv[i++] = (char *)"--getsavefilename";
+			else
+				argv[i++] = (char *)"--getopenfilename";
+
+			if (suggest_dir && *suggest_dir) {
+				if (save && suggest_name)
+					path = g_build_filename(suggest_dir,
+					                        suggest_name, NULL);
+				else
+					path = g_strdup(suggest_dir);
+				argv[i++] = path;
+			}
+
+			argv[i++] = (char *)"--title";
+			argv[i++] = (char *)title;
+			argv[i++] = NULL;
+
+			if (used_native)
+				*used_native = TRUE;
+			result = sdl_spawn_capture(argv);
+
+			g_free(path);
+			g_free(prog);
+			return result;
+		}
+	}
+#endif
+
+	return NULL;
+}
+
 static void sdl_ensure_gtk(TilemSdlUi *ui)
 {
 	int argc = 0;
@@ -984,6 +1166,19 @@ static char *sdl_pick_rom_file(TilemSdlUi *ui)
 {
 	char *dir;
 	char *filename;
+	gboolean used_native = FALSE;
+
+	if (ui->emu->rom_file_name)
+		dir = g_path_get_dirname(ui->emu->rom_file_name);
+	else
+		dir = g_get_current_dir();
+
+	filename = sdl_native_file_dialog("Open Calculator",
+	                                  dir, NULL, FALSE, &used_native);
+	g_free(dir);
+
+	if (used_native)
+		return filename;
 
 	sdl_ensure_gtk(ui);
 
@@ -1006,8 +1201,7 @@ static char *sdl_pick_state_file(TilemSdlUi *ui, const char *title)
 {
 	char *dir;
 	char *filename;
-
-	sdl_ensure_gtk(ui);
+	gboolean used_native = FALSE;
 
 	if (ui->emu->state_file_name)
 		dir = g_path_get_dirname(ui->emu->state_file_name);
@@ -1016,10 +1210,14 @@ static char *sdl_pick_state_file(TilemSdlUi *ui, const char *title)
 	else
 		dir = g_get_current_dir();
 
-	filename = prompt_open_file(title, NULL, dir,
-	                            "State files", "*.sav",
-	                            "All files", "*",
-	                            NULL);
+	filename = sdl_native_file_dialog(title, dir, NULL, FALSE, &used_native);
+	if (!used_native) {
+		sdl_ensure_gtk(ui);
+		filename = prompt_open_file(title, NULL, dir,
+		                            "State files", "*.sav",
+		                            "All files", "*",
+		                            NULL);
+	}
 	g_free(dir);
 	return filename;
 }
@@ -1029,8 +1227,7 @@ static char *sdl_pick_state_save_file(TilemSdlUi *ui)
 	char *dir;
 	char *suggest_name = NULL;
 	char *filename;
-
-	sdl_ensure_gtk(ui);
+	gboolean used_native = FALSE;
 
 	if (ui->emu->state_file_name) {
 		dir = g_path_get_dirname(ui->emu->state_file_name);
@@ -1046,13 +1243,18 @@ static char *sdl_pick_state_save_file(TilemSdlUi *ui)
 		suggest_name = g_strdup("calc.sav");
 	}
 
-	filename = prompt_save_file("Save State As",
-	                            NULL,
-	                            suggest_name,
-	                            dir,
-	                            "State files", "*.sav",
-	                            "All files", "*",
-	                            NULL);
+	filename = sdl_native_file_dialog("Save State As", dir, suggest_name,
+	                                  TRUE, &used_native);
+	if (!used_native) {
+		sdl_ensure_gtk(ui);
+		filename = prompt_save_file("Save State As",
+		                            NULL,
+		                            suggest_name,
+		                            dir,
+		                            "State files", "*.sav",
+		                            "All files", "*",
+		                            NULL);
+	}
 
 	g_free(dir);
 	g_free(suggest_name);
