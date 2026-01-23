@@ -1,3 +1,6 @@
+#ifndef TILEM_EMULATOR_H
+#define TILEM_EMULATOR_H
+
 /*
  * TilEm II
  *
@@ -17,6 +20,8 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+
+typedef struct _TilemAnimation TilemAnimation;
 
 /* Key binding */
 typedef struct _TilemKeyBinding {
@@ -261,3 +266,4 @@ void tilem_macro_play(TilemCalcEmulator *emu);
 /* Load a macro from filename or if filename == NULL prompt user */
 void tilem_macro_load(TilemCalcEmulator *emu, char* filename);
 
+#endif

@@ -24,6 +24,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <gtk/gtk.h>
 #include <glib.h>
 #include <ticalcs.h>
@@ -33,6 +34,7 @@
 #include "files.h"
 #include "icons.h"
 #include "msgbox.h"
+#include "sdlui.h"
 
 /* CMD LINE OPTIONS */
 static gchar* cl_romfile = NULL;
@@ -47,6 +49,7 @@ static gchar* cl_macro_to_run = NULL;
 static gboolean cl_debug_flag = FALSE;
 static gboolean cl_normalspeed_flag = FALSE;
 static gboolean cl_fullspeed_flag = FALSE;
+static gboolean cl_sdl_flag = FALSE;
 
 
 static GOptionEntry entries[] =
@@ -62,6 +65,7 @@ static GOptionEntry entries[] =
 	{ "debug", 'd', 0, G_OPTION_ARG_NONE, &cl_debug_flag, "Launch debugger", NULL },
 	{ "normal-speed", 0, 0, G_OPTION_ARG_NONE, &cl_normalspeed_flag, "Run at normal speed", NULL },
 	{ "full-speed", 0, 0, G_OPTION_ARG_NONE, &cl_fullspeed_flag, "Run at maximum speed", NULL },
+	{ "sdl", 0, 0, G_OPTION_ARG_NONE, &cl_sdl_flag, "Use SDL2 UI", NULL },
 	{ G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &cl_files_to_load, NULL, "FILE" },
 	{ 0, 0, 0, 0, 0, 0, 0 }
 };
@@ -216,30 +220,41 @@ int main(int argc, char **argv)
 	GOptionContext *context;
 	GError *error = NULL;
 	int model = 0;
+	gboolean want_sdl = FALSE;
+	int i;
 
 	g_thread_init(NULL);
-	gtk_init(&argc, &argv);
 	set_program_path(argv[0]);
 	g_set_application_name("TilEm");
 
-	menurc_path = get_shared_file_path("menurc", NULL);
-	if (menurc_path)
-		gtk_accel_map_load(menurc_path);
-	g_free(menurc_path);
-
-	init_custom_icons();
-	gtk_window_set_default_icon_name("tilem");
-
-	emu = tilem_calc_emulator_new();
+	for (i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "--sdl")) {
+			want_sdl = TRUE;
+			break;
+		}
+	}
 
 	context = g_option_context_new(NULL);
 	g_option_context_add_main_entries(context, entries, NULL);
-	g_option_context_add_group(context, gtk_get_option_group(TRUE));
+	if (!want_sdl)
+		g_option_context_add_group(context, gtk_get_option_group(TRUE));
 	if (!g_option_context_parse(context, &argc, &argv, &error))
 	{
 		g_printerr("%s: %s\n", g_get_prgname(), error->message);
 		exit (1);
 	}
+
+	if (!cl_sdl_flag) {
+		menurc_path = get_shared_file_path("menurc", NULL);
+		if (menurc_path)
+			gtk_accel_map_load(menurc_path);
+		g_free(menurc_path);
+
+		init_custom_icons();
+		gtk_window_set_default_icon_name("tilem");
+	}
+
+	emu = tilem_calc_emulator_new();
 
 	if (cl_model) {
 		model = name_to_model(cl_model);
@@ -248,6 +263,25 @@ int main(int argc, char **argv)
 			           g_get_prgname(), cl_model);
 			return 1;
 		}
+	}
+
+	if (cl_sdl_flag) {
+		TilemSdlOptions sdl_opts;
+		int status;
+
+		memset(&sdl_opts, 0, sizeof(sdl_opts));
+		sdl_opts.romfile = cl_romfile;
+		sdl_opts.statefile = cl_statefile;
+		sdl_opts.skinfile = cl_skinfile;
+		sdl_opts.model = model;
+		sdl_opts.skinless = cl_skinless_flag;
+		sdl_opts.reset = cl_reset_flag;
+		sdl_opts.normal_speed = cl_normalspeed_flag;
+		sdl_opts.full_speed = cl_fullspeed_flag;
+
+		status = tilem_sdl_run(emu, &sdl_opts);
+		tilem_calc_emulator_free(emu);
+		return status;
 	}
 
 	load_initial_rom(emu, cl_romfile, cl_statefile, cl_files_to_load, model);

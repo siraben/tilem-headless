@@ -91,6 +91,25 @@ You must install a recent version of GTK+ 2.x, including the
 -dev/-devel packages if appropriate.])
 fi
 
+# SDL2
+
+PKG_CHECK_MODULES(SDL2, sdl2 >= 2.0.0,
+                  [ have_sdl2=maybe ], [ have_sdl2=no ])
+
+if test "x$have_sdl2" = "xmaybe" ; then
+  with_flags(SDL2,
+    [ AC_CHECK_FUNC(SDL_Init, [ have_sdl2=yes ], [ have_sdl2=no ]) ])
+fi
+
+if test "x$have_sdl2" != "xyes" ; then
+  AC_MSG_ERROR([SDL2 not found or not usable.
+
+$SDL2_PKG_ERRORS
+
+You must install SDL2 (including the -dev/-devel packages if
+appropriate.)])
+fi
+
 # Libticalcs2 and related libraries
 
 PKG_CHECK_MODULES(TICALCS, ticalcs2 ticables2 tifiles2 ticonv,

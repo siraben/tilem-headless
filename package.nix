@@ -4,6 +4,7 @@
   pkg-config,
   glib,
   gtk2,
+  SDL2,
   libticonv,
   libtifiles2,
   libticables2,
@@ -18,6 +19,7 @@ stdenv.mkDerivation rec {
   buildInputs = [
     glib
     gtk2
+    SDL2 
     libticonv
     libtifiles2
     libticables2

@@ -1,3 +1,6 @@
+#ifndef TILEM_SKINOPS_H
+#define TILEM_SKINOPS_H
+
 /* Hey EMACS -*- linux-c -*- */
 /* $Id$ */
 
@@ -131,3 +134,4 @@ typedef struct
 int skin_load(SKIN_INFOS *infos, const char *filename, GError **err);
 int skin_unload(SKIN_INFOS *infos);
 
+#endif

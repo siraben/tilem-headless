@@ -27,6 +27,9 @@ WINDRES = @WINDRES@
 GTK_CFLAGS = @GTK_CFLAGS@
 GTK_LIBS = @GTK_LIBS@
 
+SDL2_CFLAGS = $(shell pkg-config --cflags sdl2)
+SDL2_LIBS = $(shell pkg-config --libs sdl2)
+
 TICALCS_CFLAGS = @TICALCS_CFLAGS@
 TICALCS_LIBS = @TICALCS_LIBS@
 
@@ -68,6 +71,7 @@ objects = tilem2.o \
 	memory.o \
 	pbar.o \
 	preferences.o \
+	sdlui.o \
 	sendfile.o \
 	screenshot.o \
 	skinops.o \
@@ -77,11 +81,11 @@ objects = tilem2.o \
 	tool.o \
 	$(gui_extra_objects)
 
-libs = $(TILEMDB_LIBS) $(TILEMCORE_LIBS) $(GTK_LIBS) $(TICALCS_LIBS) $(LIBS)
+libs = $(TILEMDB_LIBS) $(TILEMCORE_LIBS) $(GTK_LIBS) $(SDL2_LIBS) $(TICALCS_LIBS) $(LIBS)
 
 compile = $(CC) -I$(top_builddir) -I$(srcdir) $(CFLAGS) $(CPPFLAGS) $(DEFS) \
 	$(TILEMCORE_CFLAGS) $(TILEMDB_CFLAGS) \
-	$(GTK_CFLAGS) $(TICALCS_CFLAGS)
+	$(GTK_CFLAGS) $(SDL2_CFLAGS) $(TICALCS_CFLAGS)
 
 link = $(CC) $(CFLAGS) $(LDFLAGS) $(GUI_LDFLAGS) 
 
@@ -141,6 +145,10 @@ emucore.o: emucore.c emucore.h $(common_headers)
 # Emulator GUI (main window)
 emuwin.o: emuwin.c $(common_headers)
 	$(compile) -c $(srcdir)/emuwin.c
+
+# SDL2 UI
+sdlui.o: sdlui.c sdlui.h $(common_headers)
+	$(compile) -c $(srcdir)/sdlui.c
 
 # Handle events
 event.o: event.c $(common_headers)
