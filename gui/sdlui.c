@@ -378,7 +378,17 @@ static void sdl_draw_char(SDL_Renderer *renderer, int x, int y,
 	const unsigned char *glyph;
 	SDL_Rect pixel;
 
-	glyph = sdl_font8x8_basic[c];
+	if (c == 0x20) {
+		static const unsigned char blank[8] = { 0 };
+		glyph = blank;
+	}
+	else if (c >= 0x21 && c <= 0x7e) {
+		/* Font table is shifted for printable ASCII. */
+		glyph = sdl_font8x8_basic[c - 1];
+	}
+	else {
+		glyph = sdl_font8x8_basic[c];
+	}
 	SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
 
 	pixel.w = scale;
@@ -386,7 +396,7 @@ static void sdl_draw_char(SDL_Renderer *renderer, int x, int y,
 
 	for (row = 0; row < 8; row++) {
 		for (col = 0; col < 8; col++) {
-			if (glyph[row] & (1 << col)) {
+			if (glyph[row] & (0x80 >> col)) {
 				pixel.x = x + col * scale;
 				pixel.y = y + row * scale;
 				SDL_RenderFillRect(renderer, &pixel);
