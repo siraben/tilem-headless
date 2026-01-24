@@ -38,6 +38,7 @@
 #include "files.h"
 #include "skinops.h"
 #include "sdlpixbuf.h"
+#include "sdlicons.h"
 #include "sdlscreenshot.h"
 #include "sdldebugger.h"
 #include "ti81prg.h"
@@ -56,6 +57,7 @@ int name_to_model(const char *name);
 #define SDL_MENU_PADDING 6
 #define SDL_MENU_SPACING 2
 #define SDL_MENU_FONT_SIZE 16
+#define SDL_MENU_ICON_GAP 6
 
 typedef struct {
 	TilemCalcEmulator *emu;
@@ -98,6 +100,7 @@ typedef struct {
 	int keypress_keycodes[64];
 	int sequence_keycode;
 	TilemSdlDebugger *debugger;
+	TilemSdlIcons *icons;
 } TilemSdlUi;
 
 typedef enum {
@@ -126,35 +129,54 @@ typedef struct {
 	const char *label;
 	TilemSdlMenuAction action;
 	gboolean separator;
+	TilemSdlMenuIconId icon;
 } TilemSdlMenuItem;
 
 static const TilemSdlMenuItem sdl_menu_items[] = {
-	{ "Send File...", SDL_MENU_SEND_FILE, FALSE },
-	{ "Receive File...", SDL_MENU_RECEIVE_FILE, FALSE },
-	{ NULL, SDL_MENU_NONE, TRUE },
-	{ "Open Calculator...", SDL_MENU_OPEN_CALC, FALSE },
-	{ "Save Calculator", SDL_MENU_SAVE_CALC, FALSE },
-	{ "Revert Calculator State", SDL_MENU_REVERT_CALC, FALSE },
-	{ "Reset Calculator", SDL_MENU_RESET, FALSE },
-	{ NULL, SDL_MENU_NONE, TRUE },
-	{ "Debugger", SDL_MENU_DEBUGGER, FALSE },
-	{ "Macro >", SDL_MENU_MACRO_MENU, FALSE },
-	{ "Screenshot...", SDL_MENU_SCREENSHOT, FALSE },
-	{ "Quick Screenshot", SDL_MENU_QUICK_SCREENSHOT, FALSE },
-	{ NULL, SDL_MENU_NONE, TRUE },
-	{ "Preferences", SDL_MENU_PREFERENCES, FALSE },
-	{ NULL, SDL_MENU_NONE, TRUE },
-	{ "About", SDL_MENU_ABOUT, FALSE },
-	{ "Quit", SDL_MENU_QUIT, FALSE }
+	{ "Send File...", SDL_MENU_SEND_FILE, FALSE,
+	  TILEM_SDL_MENU_ICON_OPEN },
+	{ "Receive File...", SDL_MENU_RECEIVE_FILE, FALSE,
+	  TILEM_SDL_MENU_ICON_SAVE_AS },
+	{ NULL, SDL_MENU_NONE, TRUE, TILEM_SDL_MENU_ICON_NONE },
+	{ "Open Calculator...", SDL_MENU_OPEN_CALC, FALSE,
+	  TILEM_SDL_MENU_ICON_OPEN },
+	{ "Save Calculator", SDL_MENU_SAVE_CALC, FALSE,
+	  TILEM_SDL_MENU_ICON_SAVE },
+	{ "Revert Calculator State", SDL_MENU_REVERT_CALC, FALSE,
+	  TILEM_SDL_MENU_ICON_REVERT },
+	{ "Reset Calculator", SDL_MENU_RESET, FALSE,
+	  TILEM_SDL_MENU_ICON_CLEAR },
+	{ NULL, SDL_MENU_NONE, TRUE, TILEM_SDL_MENU_ICON_NONE },
+	{ "Debugger", SDL_MENU_DEBUGGER, FALSE,
+	  TILEM_SDL_MENU_ICON_NONE },
+	{ "Macro >", SDL_MENU_MACRO_MENU, FALSE,
+	  TILEM_SDL_MENU_ICON_NONE },
+	{ "Screenshot...", SDL_MENU_SCREENSHOT, FALSE,
+	  TILEM_SDL_MENU_ICON_NONE },
+	{ "Quick Screenshot", SDL_MENU_QUICK_SCREENSHOT, FALSE,
+	  TILEM_SDL_MENU_ICON_NONE },
+	{ NULL, SDL_MENU_NONE, TRUE, TILEM_SDL_MENU_ICON_NONE },
+	{ "Preferences", SDL_MENU_PREFERENCES, FALSE,
+	  TILEM_SDL_MENU_ICON_PREFERENCES },
+	{ NULL, SDL_MENU_NONE, TRUE, TILEM_SDL_MENU_ICON_NONE },
+	{ "About", SDL_MENU_ABOUT, FALSE,
+	  TILEM_SDL_MENU_ICON_ABOUT },
+	{ "Quit", SDL_MENU_QUIT, FALSE,
+	  TILEM_SDL_MENU_ICON_QUIT }
 };
 
 static const TilemSdlMenuItem sdl_menu_macro_items[] = {
-	{ "Begin Recording", SDL_MENU_MACRO_BEGIN, FALSE },
-	{ "End Recording", SDL_MENU_MACRO_END, FALSE },
-	{ "Play Macro", SDL_MENU_MACRO_PLAY, FALSE },
-	{ NULL, SDL_MENU_NONE, TRUE },
-	{ "Open Macro...", SDL_MENU_MACRO_OPEN, FALSE },
-	{ "Save Macro...", SDL_MENU_MACRO_SAVE, FALSE }
+	{ "Begin Recording", SDL_MENU_MACRO_BEGIN, FALSE,
+	  TILEM_SDL_MENU_ICON_RECORD },
+	{ "End Recording", SDL_MENU_MACRO_END, FALSE,
+	  TILEM_SDL_MENU_ICON_STOP },
+	{ "Play Macro", SDL_MENU_MACRO_PLAY, FALSE,
+	  TILEM_SDL_MENU_ICON_PLAY },
+	{ NULL, SDL_MENU_NONE, TRUE, TILEM_SDL_MENU_ICON_NONE },
+	{ "Open Macro...", SDL_MENU_MACRO_OPEN, FALSE,
+	  TILEM_SDL_MENU_ICON_OPEN },
+	{ "Save Macro...", SDL_MENU_MACRO_SAVE, FALSE,
+	  TILEM_SDL_MENU_ICON_SAVE_AS }
 };
 
 #define SDL_SCREENSHOT_DEFAULT_WIDTH_96 192
@@ -1295,9 +1317,62 @@ static void sdl_update_layout(TilemSdlUi *ui, int win_w, int win_h)
 
 static int sdl_menu_item_height(TilemSdlUi *ui)
 {
-	if (ui->menu_font)
-		return TTF_FontHeight(ui->menu_font) + SDL_MENU_PADDING * 2;
-	return 8 * SDL_MENU_FONT_SCALE + SDL_MENU_PADDING * 2;
+	int font_h = ui->menu_font
+		? TTF_FontHeight(ui->menu_font)
+		: 8 * SDL_MENU_FONT_SCALE;
+	int icon_h = 0;
+
+	if (ui->icons) {
+		int i;
+		for (i = 0; i < TILEM_SDL_MENU_ICON_COUNT; i++) {
+			if (ui->icons->menu[i].texture
+			    && ui->icons->menu[i].height > icon_h)
+				icon_h = ui->icons->menu[i].height;
+		}
+	}
+
+	if (icon_h > font_h)
+		font_h = icon_h;
+
+	return font_h + SDL_MENU_PADDING * 2;
+}
+
+static const TilemSdlIcon *sdl_menu_get_icon(TilemSdlUi *ui,
+                                             TilemSdlMenuIconId icon_id)
+{
+	if (!ui || !ui->icons)
+		return NULL;
+	if (icon_id <= TILEM_SDL_MENU_ICON_NONE
+	    || icon_id >= TILEM_SDL_MENU_ICON_COUNT)
+		return NULL;
+	if (!ui->icons->menu[icon_id].texture)
+		return NULL;
+	return &ui->icons->menu[icon_id];
+}
+
+static int sdl_menu_icon_column_width(TilemSdlUi *ui,
+                                      const TilemSdlMenuItem *items,
+                                      size_t n_items)
+{
+	size_t i;
+	int maxw = 0;
+
+	if (!ui || !items)
+		return 0;
+
+	for (i = 0; i < n_items; i++) {
+		const TilemSdlIcon *icon;
+
+		if (items[i].separator)
+			continue;
+		icon = sdl_menu_get_icon(ui, items[i].icon);
+		if (icon && icon->width > maxw)
+			maxw = icon->width;
+	}
+
+	if (maxw > 0)
+		return maxw + SDL_MENU_ICON_GAP;
+	return 0;
 }
 
 static int sdl_menu_text_width(TilemSdlUi *ui, const char *text)
@@ -1356,6 +1431,7 @@ static void sdl_menu_calc_size(TilemSdlUi *ui,
 	size_t i;
 	int maxw = 0;
 	int item_h = sdl_menu_item_height(ui);
+	int icon_w = sdl_menu_icon_column_width(ui, items, n_items);
 	int text_w;
 
 	for (i = 0; i < n_items; i++) {
@@ -1367,7 +1443,7 @@ static void sdl_menu_calc_size(TilemSdlUi *ui,
 	}
 
 	if (out_w)
-		*out_w = maxw + SDL_MENU_PADDING * 2;
+		*out_w = maxw + icon_w + SDL_MENU_PADDING * 2;
 	if (out_h)
 		*out_h = (int) n_items * item_h + SDL_MENU_SPACING * 2;
 }
@@ -1490,12 +1566,19 @@ static void sdl_render_menu_panel(TilemSdlUi *ui,
 	SDL_Rect item_rect;
 	size_t i;
 	int item_h;
+	int icon_col_w;
+	int icon_area_w;
+	int text_h;
 	SDL_Color text_color = { 230, 230, 230, 255 };
 	SDL_Color highlight_color = { 60, 110, 170, 255 };
 	SDL_Color bg_color = { 40, 40, 40, 240 };
 	SDL_Color border_color = { 90, 90, 90, 255 };
 
 	item_h = sdl_menu_item_height(ui);
+	icon_col_w = sdl_menu_icon_column_width(ui, items, n_items);
+	icon_area_w = (icon_col_w > 0) ? (icon_col_w - SDL_MENU_ICON_GAP) : 0;
+	text_h = ui->menu_font ? TTF_FontHeight(ui->menu_font)
+	                       : 8 * SDL_MENU_FONT_SCALE;
 	menu_rect.x = menu_x;
 	menu_rect.y = menu_y;
 	menu_rect.w = menu_w;
@@ -1537,9 +1620,27 @@ static void sdl_render_menu_panel(TilemSdlUi *ui,
 			SDL_RenderFillRect(ui->renderer, &item_rect);
 		}
 
+		if (icon_area_w > 0) {
+			const TilemSdlIcon *icon =
+				sdl_menu_get_icon(ui, items[i].icon);
+			if (icon) {
+				SDL_Rect dst;
+
+				dst.x = item_rect.x + SDL_MENU_PADDING
+				        + (icon_area_w - icon->width) / 2;
+				dst.y = item_rect.y
+				        + (item_rect.h - icon->height) / 2;
+				dst.w = icon->width;
+				dst.h = icon->height;
+				SDL_RenderCopy(ui->renderer, icon->texture,
+				               NULL, &dst);
+			}
+		}
+
 		sdl_draw_text_menu(ui,
-		                   item_rect.x + SDL_MENU_PADDING,
-		                   item_rect.y + SDL_MENU_PADDING,
+		                   item_rect.x + SDL_MENU_PADDING
+		                       + icon_col_w,
+		                   item_rect.y + (item_rect.h - text_h) / 2,
 		                   items[i].label,
 		                   text_color);
 	}
@@ -2680,6 +2781,11 @@ static void sdl_cleanup(TilemSdlUi *ui)
 
 	sdl_free_skin(ui);
 
+	if (ui->icons) {
+		tilem_sdl_icons_free(ui->icons);
+		ui->icons = NULL;
+	}
+
 	if (ui->lcd_texture)
 		SDL_DestroyTexture(ui->lcd_texture);
 	if (ui->renderer)
@@ -2732,7 +2838,7 @@ static void sdl_shutdown_ttf(TilemSdlUi *ui)
 		ui->menu_font = NULL;
 	}
 
-	if (ui->ttf_ready && TTF_WasInit())
+	if (TTF_WasInit())
 		TTF_Quit();
 	ui->ttf_ready = FALSE;
 }
@@ -2828,6 +2934,10 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 			return 1;
 		}
 	}
+
+	ui.icons = tilem_sdl_icons_load(ui.renderer);
+	if (ui.icons && ui.icons->app_surface)
+		SDL_SetWindowIcon(ui.window, ui.icons->app_surface);
 
 	if (ui.skin && !ui.skin_texture) {
 		ui.skin_texture = tilem_sdl_texture_from_pixbuf(ui.renderer,

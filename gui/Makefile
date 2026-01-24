@@ -77,6 +77,7 @@ objects = tilem2.o \
 	pbar.o \
 	preferences.o \
 	sdldebugger.o \
+	sdlicons.o \
 	sdlui.o \
 	sdlpixbuf.o \
 	sdlscreenshot.o \
@@ -156,14 +157,17 @@ emuwin.o: emuwin.c $(common_headers)
 	$(compile) -c $(srcdir)/emuwin.c
 
 # SDL2 UI
-sdlui.o: sdlui.c sdlui.h $(common_headers)
+sdlui.o: sdlui.c sdlui.h sdlicons.h $(common_headers)
 	$(compile) -c $(srcdir)/sdlui.c
 
-sdldebugger.o: sdldebugger.c sdldebugger.h $(common_headers)
+sdldebugger.o: sdldebugger.c sdldebugger.h sdlicons.h $(common_headers)
 	$(compile) -c $(srcdir)/sdldebugger.c
 
 sdlpixbuf.o: sdlpixbuf.c sdlpixbuf.h $(common_headers)
 	$(compile) -c $(srcdir)/sdlpixbuf.c
+
+sdlicons.o: sdlicons.c sdlicons.h files.h $(common_headers)
+	$(compile) -c $(srcdir)/sdlicons.c
 
 sdlscreenshot.o: sdlscreenshot.c sdlscreenshot.h $(common_headers)
 	$(compile) -c $(srcdir)/sdlscreenshot.c

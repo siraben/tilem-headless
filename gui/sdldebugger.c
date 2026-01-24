@@ -36,6 +36,7 @@
 
 #include "sdldebugger.h"
 #include "files.h"
+#include "sdlicons.h"
 
 void tilem_config_get(const char *group, const char *option, ...);
 void tilem_config_set(const char *group, const char *option, ...);
@@ -56,6 +57,10 @@ void tilem_config_set(const char *group, const char *option, ...);
 #define SDL_DEBUGGER_BP_LINES 14
 #define SDL_DEBUGGER_KEYPAD_COLS 8
 #define SDL_DEBUGGER_KEYPAD_ROWS 7
+#define SDL_DEBUGGER_ICON_GAP 6
+#define SDL_DEBUGGER_MENU_PADDING 6
+#define SDL_DEBUGGER_MENU_SPACING 2
+#define SDL_DEBUGGER_MENU_ICON_GAP 6
 
 enum {
 	SDL_DBG_BP_LOGICAL,
@@ -76,6 +81,51 @@ typedef enum {
 	SDL_DBG_INPUT_BP_ADD,
 	SDL_DBG_INPUT_BP_EDIT
 } TilemSdlInputMode;
+
+typedef enum {
+	SDL_DBG_MENU_BAR_NONE = -1,
+	SDL_DBG_MENU_BAR_DEBUG,
+	SDL_DBG_MENU_BAR_VIEW,
+	SDL_DBG_MENU_BAR_GO,
+	SDL_DBG_MENU_BAR_COUNT
+} TilemSdlMenuBar;
+
+typedef enum {
+	SDL_DBG_MENU_ACTION_NONE,
+	SDL_DBG_MENU_ACTION_RUN,
+	SDL_DBG_MENU_ACTION_PAUSE,
+	SDL_DBG_MENU_ACTION_STEP,
+	SDL_DBG_MENU_ACTION_STEP_OVER,
+	SDL_DBG_MENU_ACTION_FINISH,
+	SDL_DBG_MENU_ACTION_BREAKPOINTS,
+	SDL_DBG_MENU_ACTION_CLOSE,
+	SDL_DBG_MENU_ACTION_VIEW_KEYPAD,
+	SDL_DBG_MENU_ACTION_VIEW_LOGICAL,
+	SDL_DBG_MENU_ACTION_VIEW_ABSOLUTE,
+	SDL_DBG_MENU_ACTION_GO_ADDRESS,
+	SDL_DBG_MENU_ACTION_GO_PC,
+	SDL_DBG_MENU_ACTION_PREV_STACK,
+	SDL_DBG_MENU_ACTION_NEXT_STACK
+} TilemSdlDbgMenuAction;
+
+enum {
+	SDL_DBG_MENU_FLAG_TOGGLE = 1 << 0,
+	SDL_DBG_MENU_FLAG_RADIO = 1 << 1
+};
+
+typedef struct {
+	const char *label;
+	TilemSdlDbgMenuAction action;
+	gboolean separator;
+	int flags;
+} TilemSdlDbgMenuItem;
+
+typedef struct {
+	TilemSdlDbgMenuAction action;
+	const TilemSdlIcon *icon;
+	const char *label;
+	SDL_Rect rect;
+} TilemSdlDbgToolbarButton;
 
 typedef struct {
 	int type;
@@ -101,10 +151,14 @@ typedef struct {
 	SDL_Rect regs_rect;
 	SDL_Rect stack_rect;
 	SDL_Rect mem_rect;
+	SDL_Rect toolbar_rect;
+	SDL_Rect menu_rect;
 	int disasm_lines;
 	int mem_rows;
 	int stack_rows;
 	int reg_lines;
+	int disasm_icon_w;
+	int toolbar_icon_h;
 } TilemSdlDebuggerLayout;
 
 struct _TilemSdlDebugger {
@@ -141,7 +195,62 @@ struct _TilemSdlDebugger {
 	char input_error[SDL_DEBUGGER_INPUT_MAX];
 	int input_bp_index;
 	TilemSdlKeypad keypad;
+	TilemSdlIcons *icons;
+	gboolean menu_open;
+	TilemSdlMenuBar menu_active;
+	int menu_selected;
+	SDL_Rect menu_bar_items[SDL_DBG_MENU_BAR_COUNT];
 };
+
+static const char * const sdl_dbg_menu_bar_labels[] = {
+	"Debug",
+	"View",
+	"Go"
+};
+
+static const TilemSdlDbgMenuItem sdl_dbg_menu_debug_items[] = {
+	{ "Run", SDL_DBG_MENU_ACTION_RUN, FALSE, 0 },
+	{ "Pause", SDL_DBG_MENU_ACTION_PAUSE, FALSE, 0 },
+	{ NULL, SDL_DBG_MENU_ACTION_NONE, TRUE, 0 },
+	{ "Step", SDL_DBG_MENU_ACTION_STEP, FALSE, 0 },
+	{ "Step Over", SDL_DBG_MENU_ACTION_STEP_OVER, FALSE, 0 },
+	{ "Finish Subroutine", SDL_DBG_MENU_ACTION_FINISH, FALSE, 0 },
+	{ NULL, SDL_DBG_MENU_ACTION_NONE, TRUE, 0 },
+	{ "Breakpoints", SDL_DBG_MENU_ACTION_BREAKPOINTS, FALSE, 0 },
+	{ NULL, SDL_DBG_MENU_ACTION_NONE, TRUE, 0 },
+	{ "Close", SDL_DBG_MENU_ACTION_CLOSE, FALSE, 0 }
+};
+
+static const TilemSdlDbgMenuItem sdl_dbg_menu_view_items[] = {
+	{ "Keypad", SDL_DBG_MENU_ACTION_VIEW_KEYPAD, FALSE,
+	  SDL_DBG_MENU_FLAG_TOGGLE },
+	{ NULL, SDL_DBG_MENU_ACTION_NONE, TRUE, 0 },
+	{ "Logical Addresses", SDL_DBG_MENU_ACTION_VIEW_LOGICAL, FALSE,
+	  SDL_DBG_MENU_FLAG_RADIO },
+	{ "Absolute Addresses", SDL_DBG_MENU_ACTION_VIEW_ABSOLUTE, FALSE,
+	  SDL_DBG_MENU_FLAG_RADIO }
+};
+
+static const TilemSdlDbgMenuItem sdl_dbg_menu_go_items[] = {
+	{ "Address...", SDL_DBG_MENU_ACTION_GO_ADDRESS, FALSE, 0 },
+	{ "Current PC", SDL_DBG_MENU_ACTION_GO_PC, FALSE, 0 },
+	{ NULL, SDL_DBG_MENU_ACTION_NONE, TRUE, 0 },
+	{ "Previous Stack Entry", SDL_DBG_MENU_ACTION_PREV_STACK, FALSE, 0 },
+	{ "Next Stack Entry", SDL_DBG_MENU_ACTION_NEXT_STACK, FALSE, 0 }
+};
+
+static void sdl_dbg_start_input(TilemSdlDebugger *dbg,
+                                TilemSdlInputMode mode,
+                                const char *prefill);
+static void sdl_dbg_toggle_breakpoints_dialog(TilemSdlDebugger *dbg);
+static void sdl_dbg_set_mem_mode(TilemSdlDebugger *dbg, gboolean logical);
+static void sdl_dbg_go_to_pc(TilemSdlDebugger *dbg);
+static void sdl_dbg_go_to_stack_pos(TilemSdlDebugger *dbg, int pos);
+static void sdl_dbg_step(TilemSdlDebugger *dbg);
+static void sdl_dbg_step_over(TilemSdlDebugger *dbg);
+static void sdl_dbg_finish(TilemSdlDebugger *dbg);
+static void sdl_dbg_keypad_show(TilemSdlDebugger *dbg);
+static void sdl_dbg_keypad_hide(TilemSdlDebugger *dbg);
 
 static char *sdl_dbg_find_mono_font_path(void)
 {
@@ -199,6 +308,19 @@ static void sdl_dbg_draw_text(TilemSdlDebugger *dbg, int x, int y,
 	SDL_FreeSurface(surface);
 }
 
+static int sdl_dbg_text_width(TilemSdlDebugger *dbg, const char *text)
+{
+	int width = 0;
+	int height = 0;
+
+	if (!dbg || !dbg->font || !text)
+		return 0;
+
+	if (TTF_SizeUTF8(dbg->font, text, &width, &height) == 0)
+		return width;
+	return 0;
+}
+
 static gboolean sdl_dbg_init_ttf(TilemSdlDebugger *dbg)
 {
 	char *font_path;
@@ -247,17 +369,620 @@ static void sdl_dbg_shutdown_ttf(TilemSdlDebugger *dbg)
 		TTF_CloseFont(dbg->font);
 		dbg->font = NULL;
 	}
-
-	if (dbg->ttf_ready && TTF_WasInit())
-		TTF_Quit();
 	dbg->ttf_ready = FALSE;
 }
+
+static int sdl_dbg_icon_size(const TilemSdlIcon *icon)
+{
+	if (!icon || !icon->texture)
+		return 0;
+	return (icon->width > icon->height) ? icon->width : icon->height;
+}
+
+static gboolean sdl_dbg_has_disasm_icons(TilemSdlDebugger *dbg)
+{
+	if (!dbg || !dbg->icons)
+		return FALSE;
+	return (dbg->icons->disasm_pc.texture
+	        || dbg->icons->disasm_break.texture
+	        || dbg->icons->disasm_break_pc.texture);
+}
+
+static int sdl_dbg_menu_bar_height(TilemSdlDebugger *dbg)
+{
+	int font_h;
+
+	if (!dbg || !dbg->font)
+		return dbg ? dbg->line_height + SDL_DEBUGGER_MENU_PADDING * 2
+		           : 0;
+
+	font_h = TTF_FontHeight(dbg->font);
+	if (font_h <= 0)
+		font_h = dbg->line_height;
+	return font_h + SDL_DEBUGGER_MENU_PADDING * 2;
+}
+
+static const TilemSdlDbgMenuItem *sdl_dbg_menu_items(TilemSdlMenuBar menu,
+                                                     size_t *out_len)
+{
+	switch (menu) {
+	case SDL_DBG_MENU_BAR_DEBUG:
+		if (out_len)
+			*out_len = G_N_ELEMENTS(sdl_dbg_menu_debug_items);
+		return sdl_dbg_menu_debug_items;
+	case SDL_DBG_MENU_BAR_VIEW:
+		if (out_len)
+			*out_len = G_N_ELEMENTS(sdl_dbg_menu_view_items);
+		return sdl_dbg_menu_view_items;
+	case SDL_DBG_MENU_BAR_GO:
+		if (out_len)
+			*out_len = G_N_ELEMENTS(sdl_dbg_menu_go_items);
+		return sdl_dbg_menu_go_items;
+	default:
+		break;
+	}
+
+	if (out_len)
+		*out_len = 0;
+	return NULL;
+}
+
+static const TilemSdlIcon *sdl_dbg_menu_item_icon(TilemSdlDebugger *dbg,
+                                                  TilemSdlDbgMenuAction action)
+{
+	if (!dbg || !dbg->icons)
+		return NULL;
+
+	switch (action) {
+	case SDL_DBG_MENU_ACTION_RUN:
+		return dbg->icons->db_run.texture ? &dbg->icons->db_run : NULL;
+	case SDL_DBG_MENU_ACTION_PAUSE:
+		return dbg->icons->db_pause.texture ? &dbg->icons->db_pause
+		                                    : NULL;
+	case SDL_DBG_MENU_ACTION_STEP:
+		return dbg->icons->db_step.texture ? &dbg->icons->db_step : NULL;
+	case SDL_DBG_MENU_ACTION_STEP_OVER:
+		return dbg->icons->db_step_over.texture
+			? &dbg->icons->db_step_over
+			: NULL;
+	case SDL_DBG_MENU_ACTION_FINISH:
+		return dbg->icons->db_finish.texture
+			? &dbg->icons->db_finish
+			: NULL;
+	case SDL_DBG_MENU_ACTION_CLOSE:
+		if (dbg->icons->menu[TILEM_SDL_MENU_ICON_CLOSE].texture)
+			return &dbg->icons->menu[TILEM_SDL_MENU_ICON_CLOSE];
+		return NULL;
+	default:
+		return NULL;
+	}
+}
+
+static int sdl_dbg_menu_indicator_width(const TilemSdlDbgMenuItem *items,
+                                        size_t n_items)
+{
+	size_t i;
+
+	if (!items)
+		return 0;
+
+	for (i = 0; i < n_items; i++) {
+		if (items[i].separator)
+			continue;
+		if (items[i].flags & (SDL_DBG_MENU_FLAG_TOGGLE
+		                      | SDL_DBG_MENU_FLAG_RADIO))
+			return 10;
+	}
+
+	return 0;
+}
+
+static int sdl_dbg_menu_icon_column_width(TilemSdlDebugger *dbg,
+                                          const TilemSdlDbgMenuItem *items,
+                                          size_t n_items)
+{
+	size_t i;
+	int maxw = 0;
+	int indicator_w = sdl_dbg_menu_indicator_width(items, n_items);
+
+	if (!dbg || !items)
+		return 0;
+
+	for (i = 0; i < n_items; i++) {
+		const TilemSdlIcon *icon;
+
+		if (items[i].separator)
+			continue;
+		icon = sdl_dbg_menu_item_icon(dbg, items[i].action);
+		if (icon && icon->width > maxw)
+			maxw = icon->width;
+	}
+
+	if (indicator_w > maxw)
+		maxw = indicator_w;
+
+	if (maxw > 0)
+		return maxw + SDL_DEBUGGER_MENU_ICON_GAP;
+	return 0;
+}
+
+static int sdl_dbg_menu_item_height(TilemSdlDebugger *dbg,
+                                    const TilemSdlDbgMenuItem *items,
+                                    size_t n_items)
+{
+	int font_h = 0;
+	int icon_h = 0;
+	size_t i;
+
+	if (dbg && dbg->font)
+		font_h = TTF_FontHeight(dbg->font);
+	if (font_h <= 0)
+		font_h = dbg ? dbg->line_height : 0;
+
+	if (dbg && items) {
+		for (i = 0; i < n_items; i++) {
+			const TilemSdlIcon *icon;
+
+			if (items[i].separator)
+				continue;
+			icon = sdl_dbg_menu_item_icon(dbg, items[i].action);
+			if (icon && icon->height > icon_h)
+				icon_h = icon->height;
+		}
+	}
+
+	if (icon_h > font_h)
+		font_h = icon_h;
+
+	return font_h + SDL_DEBUGGER_MENU_PADDING * 2;
+}
+
+static gboolean sdl_dbg_is_paused(TilemSdlDebugger *dbg)
+{
+	return dbg && dbg->emu && dbg->emu->paused;
+}
+
+static gboolean sdl_dbg_menu_action_enabled(TilemSdlDebugger *dbg,
+                                            TilemSdlDbgMenuAction action)
+{
+	gboolean paused = sdl_dbg_is_paused(dbg);
+
+	if (!dbg || !dbg->emu)
+		return FALSE;
+
+	switch (action) {
+	case SDL_DBG_MENU_ACTION_RUN:
+		return paused;
+	case SDL_DBG_MENU_ACTION_PAUSE:
+		return !paused;
+	case SDL_DBG_MENU_ACTION_STEP:
+	case SDL_DBG_MENU_ACTION_STEP_OVER:
+	case SDL_DBG_MENU_ACTION_FINISH:
+	case SDL_DBG_MENU_ACTION_BREAKPOINTS:
+	case SDL_DBG_MENU_ACTION_VIEW_LOGICAL:
+	case SDL_DBG_MENU_ACTION_VIEW_ABSOLUTE:
+	case SDL_DBG_MENU_ACTION_GO_ADDRESS:
+	case SDL_DBG_MENU_ACTION_GO_PC:
+		return paused;
+	case SDL_DBG_MENU_ACTION_PREV_STACK:
+		return paused && dbg->stack_index >= 0;
+	case SDL_DBG_MENU_ACTION_NEXT_STACK:
+		return paused;
+	case SDL_DBG_MENU_ACTION_VIEW_KEYPAD:
+	case SDL_DBG_MENU_ACTION_CLOSE:
+		return TRUE;
+	default:
+		return TRUE;
+	}
+}
+
+static gboolean sdl_dbg_menu_action_checked(TilemSdlDebugger *dbg,
+                                            const TilemSdlDbgMenuItem *item)
+{
+	if (!dbg || !item)
+		return FALSE;
+
+	switch (item->action) {
+	case SDL_DBG_MENU_ACTION_VIEW_KEYPAD:
+		return dbg->keypad.visible;
+	case SDL_DBG_MENU_ACTION_VIEW_LOGICAL:
+		return dbg->mem_logical;
+	case SDL_DBG_MENU_ACTION_VIEW_ABSOLUTE:
+		return !dbg->mem_logical;
+	default:
+		return FALSE;
+	}
+}
+
+static void sdl_dbg_menu_close(TilemSdlDebugger *dbg)
+{
+	if (!dbg)
+		return;
+
+	dbg->menu_open = FALSE;
+	dbg->menu_active = SDL_DBG_MENU_BAR_NONE;
+	dbg->menu_selected = -1;
+}
+
+static int sdl_dbg_menu_first_selectable(const TilemSdlDbgMenuItem *items,
+                                         size_t n_items)
+{
+	size_t i;
+
+	if (!items)
+		return -1;
+
+	for (i = 0; i < n_items; i++) {
+		if (!items[i].separator)
+			return (int) i;
+	}
+
+	return -1;
+}
+
+static void sdl_dbg_menu_bar_layout(TilemSdlDebugger *dbg,
+                                    const TilemSdlDebuggerLayout *layout)
+{
+	int x;
+	int i;
+
+	if (!dbg || !layout)
+		return;
+
+	x = layout->menu_rect.x + SDL_DEBUGGER_MENU_PADDING;
+	for (i = 0; i < SDL_DBG_MENU_BAR_COUNT; i++) {
+		int w = sdl_dbg_text_width(dbg, sdl_dbg_menu_bar_labels[i])
+		        + SDL_DEBUGGER_MENU_PADDING * 2;
+		dbg->menu_bar_items[i].x = x;
+		dbg->menu_bar_items[i].y = layout->menu_rect.y;
+		dbg->menu_bar_items[i].w = w;
+		dbg->menu_bar_items[i].h = layout->menu_rect.h;
+		x += w + SDL_DEBUGGER_MENU_SPACING;
+	}
+}
+
+static TilemSdlMenuBar sdl_dbg_menu_hit_test_bar(TilemSdlDebugger *dbg,
+                                                 const TilemSdlDebuggerLayout *layout,
+                                                 int x, int y)
+{
+	int i;
+
+	if (!dbg || !layout)
+		return SDL_DBG_MENU_BAR_NONE;
+	if (x < layout->menu_rect.x || x >= layout->menu_rect.x + layout->menu_rect.w
+	    || y < layout->menu_rect.y || y >= layout->menu_rect.y + layout->menu_rect.h)
+		return SDL_DBG_MENU_BAR_NONE;
+
+	sdl_dbg_menu_bar_layout(dbg, layout);
+	for (i = 0; i < SDL_DBG_MENU_BAR_COUNT; i++) {
+		SDL_Rect rect = dbg->menu_bar_items[i];
+		if (x >= rect.x && x < rect.x + rect.w
+		    && y >= rect.y && y < rect.y + rect.h)
+			return (TilemSdlMenuBar) i;
+	}
+
+	return SDL_DBG_MENU_BAR_NONE;
+}
+
+static void sdl_dbg_menu_calc_size(TilemSdlDebugger *dbg,
+                                   const TilemSdlDbgMenuItem *items,
+                                   size_t n_items,
+                                   int *out_w,
+                                   int *out_h)
+{
+	size_t i;
+	int maxw = 0;
+	int icon_w = sdl_dbg_menu_icon_column_width(dbg, items, n_items);
+	int item_h = sdl_dbg_menu_item_height(dbg, items, n_items);
+	int text_w;
+
+	for (i = 0; i < n_items; i++) {
+		if (items[i].separator)
+			continue;
+		text_w = sdl_dbg_text_width(dbg, items[i].label);
+		if (text_w > maxw)
+			maxw = text_w;
+	}
+
+	if (out_w)
+		*out_w = maxw + icon_w + SDL_DEBUGGER_MENU_PADDING * 2;
+	if (out_h)
+		*out_h = (int) n_items * item_h + SDL_DEBUGGER_MENU_SPACING * 2;
+}
+
+static void sdl_dbg_menu_panel_bounds(TilemSdlDebugger *dbg,
+                                      const TilemSdlDebuggerLayout *layout,
+                                      TilemSdlMenuBar menu,
+                                      int *out_x,
+                                      int *out_y,
+                                      int *out_w,
+                                      int *out_h)
+{
+	const TilemSdlDbgMenuItem *items;
+	size_t n_items;
+	int x;
+	int y;
+	int w;
+	int h;
+
+	items = sdl_dbg_menu_items(menu, &n_items);
+	if (!items || n_items == 0) {
+		if (out_x) *out_x = 0;
+		if (out_y) *out_y = 0;
+		if (out_w) *out_w = 0;
+		if (out_h) *out_h = 0;
+		return;
+	}
+
+	sdl_dbg_menu_bar_layout(dbg, layout);
+	x = dbg->menu_bar_items[menu].x;
+	y = layout->menu_rect.y + layout->menu_rect.h;
+	sdl_dbg_menu_calc_size(dbg, items, n_items, &w, &h);
+
+	if (x + w > dbg->window_width)
+		x = MAX(dbg->window_width - w, 0);
+	if (y + h > dbg->window_height)
+		y = MAX(dbg->window_height - h, 0);
+
+	if (out_x) *out_x = x;
+	if (out_y) *out_y = y;
+	if (out_w) *out_w = w;
+	if (out_h) *out_h = h;
+}
+
+static int sdl_dbg_toolbar_layout(TilemSdlDebugger *dbg,
+                                  const TilemSdlDebuggerLayout *layout,
+                                  TilemSdlDbgToolbarButton *buttons,
+                                  int max_buttons)
+{
+	static const struct {
+		TilemSdlDbgMenuAction action;
+		const char *label;
+	} button_defs[] = {
+		{ SDL_DBG_MENU_ACTION_RUN, "Run" },
+		{ SDL_DBG_MENU_ACTION_PAUSE, "Pause" },
+		{ SDL_DBG_MENU_ACTION_STEP, "Step" },
+		{ SDL_DBG_MENU_ACTION_STEP_OVER, "Step Over" },
+		{ SDL_DBG_MENU_ACTION_FINISH, "Finish" }
+	};
+	int count = 0;
+	int i;
+	int x;
+
+	if (!dbg || !layout || !buttons || max_buttons <= 0)
+		return 0;
+	if (layout->toolbar_rect.h <= 0)
+		return 0;
+
+	x = layout->toolbar_rect.x;
+	for (i = 0; i < (int) G_N_ELEMENTS(button_defs); i++) {
+		const TilemSdlIcon *icon =
+			sdl_dbg_menu_item_icon(dbg, button_defs[i].action);
+		int content_w;
+		int w;
+
+		content_w = icon ? icon->width
+		                 : sdl_dbg_text_width(dbg,
+		                                      button_defs[i].label);
+		w = content_w + SDL_DEBUGGER_MENU_PADDING * 2;
+
+		buttons[count].action = button_defs[i].action;
+		buttons[count].icon = icon;
+		buttons[count].label = button_defs[i].label;
+		buttons[count].rect.x = x;
+		buttons[count].rect.y = layout->toolbar_rect.y;
+		buttons[count].rect.w = w;
+		buttons[count].rect.h = layout->toolbar_rect.h;
+
+		x += w + SDL_DEBUGGER_ICON_GAP;
+		count++;
+		if (count >= max_buttons)
+			break;
+	}
+
+	return count;
+}
+
+static int sdl_dbg_menu_hit_test_items(TilemSdlDebugger *dbg,
+                                       const TilemSdlDbgMenuItem *items,
+                                       size_t n_items,
+                                       int menu_x, int menu_y,
+                                       int menu_w, int menu_h,
+                                       int x, int y)
+{
+	int rel_y;
+	int item_h;
+	int index;
+
+	if (!items)
+		return -1;
+	if (x < menu_x || y < menu_y || x >= menu_x + menu_w
+	    || y >= menu_y + menu_h)
+		return -1;
+
+	item_h = sdl_dbg_menu_item_height(dbg, items, n_items);
+	rel_y = y - menu_y - SDL_DEBUGGER_MENU_SPACING;
+	if (rel_y < 0)
+		return -1;
+
+	index = rel_y / item_h;
+	if (index < 0 || index >= (int) n_items)
+		return -1;
+	if (items[index].separator)
+		return -1;
+
+	return index;
+}
+
+static void sdl_dbg_start_goto(TilemSdlDebugger *dbg)
+{
+	char prefill[SDL_DEBUGGER_LINE_BUFSZ];
+	dword addr;
+	int addr_width;
+
+	if (!dbg)
+		return;
+
+	addr = dbg->disasm_cursor;
+	addr_width = dbg->mem_logical ? 4 : 6;
+	snprintf(prefill, sizeof(prefill), "%0*X", addr_width, addr);
+	sdl_dbg_start_input(dbg, SDL_DBG_INPUT_GOTO, prefill);
+}
+
+static void sdl_dbg_handle_menu_action(TilemSdlDebugger *dbg,
+                                       TilemSdlDbgMenuAction action)
+{
+	if (!dbg || !dbg->emu)
+		return;
+	if (!sdl_dbg_menu_action_enabled(dbg, action))
+		return;
+
+	switch (action) {
+	case SDL_DBG_MENU_ACTION_RUN:
+		tilem_calc_emulator_run(dbg->emu);
+		break;
+	case SDL_DBG_MENU_ACTION_PAUSE:
+		tilem_calc_emulator_pause(dbg->emu);
+		break;
+	case SDL_DBG_MENU_ACTION_STEP:
+		sdl_dbg_step(dbg);
+		break;
+	case SDL_DBG_MENU_ACTION_STEP_OVER:
+		sdl_dbg_step_over(dbg);
+		break;
+	case SDL_DBG_MENU_ACTION_FINISH:
+		sdl_dbg_finish(dbg);
+		break;
+	case SDL_DBG_MENU_ACTION_BREAKPOINTS:
+		sdl_dbg_toggle_breakpoints_dialog(dbg);
+		break;
+	case SDL_DBG_MENU_ACTION_CLOSE:
+		tilem_sdl_debugger_hide(dbg);
+		break;
+	case SDL_DBG_MENU_ACTION_VIEW_KEYPAD:
+		if (dbg->keypad.visible)
+			sdl_dbg_keypad_hide(dbg);
+		else
+			sdl_dbg_keypad_show(dbg);
+		break;
+	case SDL_DBG_MENU_ACTION_VIEW_LOGICAL:
+		sdl_dbg_set_mem_mode(dbg, TRUE);
+		break;
+	case SDL_DBG_MENU_ACTION_VIEW_ABSOLUTE:
+		sdl_dbg_set_mem_mode(dbg, FALSE);
+		break;
+	case SDL_DBG_MENU_ACTION_GO_ADDRESS:
+		sdl_dbg_start_goto(dbg);
+		break;
+	case SDL_DBG_MENU_ACTION_GO_PC:
+		sdl_dbg_go_to_pc(dbg);
+		break;
+	case SDL_DBG_MENU_ACTION_PREV_STACK:
+		sdl_dbg_go_to_stack_pos(dbg, dbg->stack_index - 1);
+		break;
+	case SDL_DBG_MENU_ACTION_NEXT_STACK:
+		sdl_dbg_go_to_stack_pos(dbg, dbg->stack_index + 1);
+		break;
+	default:
+		break;
+	}
+}
+
+static void sdl_dbg_menu_open(TilemSdlDebugger *dbg,
+                              TilemSdlMenuBar menu)
+{
+	size_t n_items = 0;
+	const TilemSdlDbgMenuItem *items;
+
+	if (!dbg)
+		return;
+
+	dbg->menu_open = TRUE;
+	dbg->menu_active = menu;
+	items = sdl_dbg_menu_items(menu, &n_items);
+	dbg->menu_selected = sdl_dbg_menu_first_selectable(items, n_items);
+}
+
+static gboolean sdl_dbg_menu_handle_key(TilemSdlDebugger *dbg,
+                                        SDL_Keycode sym)
+{
+	const TilemSdlDbgMenuItem *items;
+	size_t n_items = 0;
+	int idx;
+	int i;
+
+	if (!dbg || !dbg->menu_open || dbg->menu_active == SDL_DBG_MENU_BAR_NONE)
+		return FALSE;
+
+	items = sdl_dbg_menu_items(dbg->menu_active, &n_items);
+	if (!items || n_items == 0) {
+		sdl_dbg_menu_close(dbg);
+		return TRUE;
+	}
+
+	switch (sym) {
+	case SDLK_ESCAPE:
+		sdl_dbg_menu_close(dbg);
+		return TRUE;
+	case SDLK_UP:
+		if (dbg->menu_selected < 0)
+			dbg->menu_selected = sdl_dbg_menu_first_selectable(items,
+			                                                   n_items);
+		for (i = dbg->menu_selected - 1; i >= 0; i--) {
+			if (!items[i].separator) {
+				dbg->menu_selected = i;
+				break;
+			}
+		}
+		return TRUE;
+	case SDLK_DOWN:
+		if (dbg->menu_selected < 0)
+			dbg->menu_selected = sdl_dbg_menu_first_selectable(items,
+			                                                   n_items);
+		for (i = dbg->menu_selected + 1; i < (int) n_items; i++) {
+			if (!items[i].separator) {
+				dbg->menu_selected = i;
+				break;
+			}
+		}
+		return TRUE;
+	case SDLK_LEFT:
+	case SDLK_RIGHT: {
+		int dir = (sym == SDLK_RIGHT) ? 1 : -1;
+		int next = (int) dbg->menu_active + dir;
+		if (next < 0)
+			next = SDL_DBG_MENU_BAR_COUNT - 1;
+		if (next >= SDL_DBG_MENU_BAR_COUNT)
+			next = 0;
+		sdl_dbg_menu_open(dbg, (TilemSdlMenuBar) next);
+		return TRUE;
+	}
+	case SDLK_RETURN:
+	case SDLK_KP_ENTER:
+		idx = dbg->menu_selected;
+		if (idx >= 0 && idx < (int) n_items) {
+			if (sdl_dbg_menu_action_enabled(dbg,
+			                                items[idx].action)) {
+				sdl_dbg_menu_close(dbg);
+				sdl_dbg_handle_menu_action(
+					dbg, items[idx].action);
+			}
+		}
+		return TRUE;
+	default:
+		return TRUE;
+	}
+}
+
 
 static void sdl_dbg_compute_layout(TilemSdlDebugger *dbg,
                                    TilemSdlDebuggerLayout *layout)
 {
-	int header_h = dbg->line_height * 2 + SDL_DEBUGGER_MARGIN;
-	int content_h = dbg->window_height - header_h - SDL_DEBUGGER_MARGIN;
+	int menu_h = sdl_dbg_menu_bar_height(dbg);
+	int toolbar_h = 0;
+	int toolbar_gap = 0;
+	int header_h;
+	int content_h;
 	int mem_rows = SDL_DEBUGGER_MEM_ROWS;
 	int mem_h;
 	int top_h;
@@ -266,6 +991,25 @@ static void sdl_dbg_compute_layout(TilemSdlDebugger *dbg,
 	int reg_lines = 9;
 	int reg_h;
 	int side_x;
+	int disasm_icon_w = 0;
+	int icon_size;
+
+	if (dbg && dbg->icons) {
+		icon_size = sdl_dbg_icon_size(&dbg->icons->db_run);
+		icon_size = MAX(icon_size,
+		                sdl_dbg_icon_size(&dbg->icons->db_pause));
+		icon_size = MAX(icon_size,
+		                sdl_dbg_icon_size(&dbg->icons->db_step));
+		icon_size = MAX(icon_size,
+		                sdl_dbg_icon_size(&dbg->icons->db_step_over));
+		icon_size = MAX(icon_size,
+		                sdl_dbg_icon_size(&dbg->icons->db_finish));
+	}
+	toolbar_h = MAX(icon_size, dbg->line_height);
+	toolbar_gap = SDL_DEBUGGER_MENU_SPACING;
+
+	header_h = menu_h + toolbar_gap + toolbar_h + SDL_DEBUGGER_MARGIN;
+	content_h = dbg->window_height - header_h - SDL_DEBUGGER_MARGIN;
 
 	if (content_h < dbg->line_height * 6)
 		content_h = dbg->line_height * 6;
@@ -318,10 +1062,41 @@ static void sdl_dbg_compute_layout(TilemSdlDebugger *dbg,
 	layout->mem_rect.w = dbg->window_width - SDL_DEBUGGER_MARGIN * 2;
 	layout->mem_rect.h = mem_h;
 
+	layout->menu_rect.x = 0;
+	layout->menu_rect.y = 0;
+	layout->menu_rect.w = dbg->window_width;
+	layout->menu_rect.h = menu_h;
+
+	if (toolbar_h > 0) {
+		layout->toolbar_rect.x = SDL_DEBUGGER_MARGIN;
+		layout->toolbar_rect.y = menu_h + toolbar_gap;
+		layout->toolbar_rect.w = dbg->window_width
+		                         - SDL_DEBUGGER_MARGIN * 2;
+		layout->toolbar_rect.h = toolbar_h;
+	}
+	else {
+		layout->toolbar_rect.x = 0;
+		layout->toolbar_rect.y = 0;
+		layout->toolbar_rect.w = 0;
+		layout->toolbar_rect.h = 0;
+	}
+
+	if (sdl_dbg_has_disasm_icons(dbg)) {
+		icon_size = sdl_dbg_icon_size(&dbg->icons->disasm_pc);
+		icon_size = MAX(icon_size,
+		                sdl_dbg_icon_size(&dbg->icons->disasm_break));
+		icon_size = MAX(icon_size,
+		                sdl_dbg_icon_size(&dbg->icons->disasm_break_pc));
+		if (icon_size > 0)
+			disasm_icon_w = icon_size + SDL_DEBUGGER_ICON_GAP;
+	}
+
 	layout->disasm_lines = layout->disasm_rect.h / dbg->line_height;
 	layout->mem_rows = layout->mem_rect.h / dbg->line_height;
 	layout->stack_rows = layout->stack_rect.h / dbg->line_height;
 	layout->reg_lines = reg_lines;
+	layout->disasm_icon_w = disasm_icon_w;
+	layout->toolbar_icon_h = toolbar_h;
 
 	if (layout->disasm_lines > SDL_DEBUGGER_MAX_LINES)
 		layout->disasm_lines = SDL_DEBUGGER_MAX_LINES;
@@ -329,6 +1104,21 @@ static void sdl_dbg_compute_layout(TilemSdlDebugger *dbg,
 		layout->mem_rows = SDL_DEBUGGER_MAX_LINES;
 	if (layout->stack_rows > SDL_DEBUGGER_MAX_LINES)
 		layout->stack_rows = SDL_DEBUGGER_MAX_LINES;
+}
+
+static const TilemSdlIcon *sdl_dbg_pick_disasm_icon(TilemSdlDebugger *dbg,
+                                                    gboolean is_pc,
+                                                    gboolean is_bp)
+{
+	if (!dbg || !dbg->icons)
+		return NULL;
+	if (is_pc && is_bp && dbg->icons->disasm_break_pc.texture)
+		return &dbg->icons->disasm_break_pc;
+	if (is_bp && dbg->icons->disasm_break.texture)
+		return &dbg->icons->disasm_break;
+	if (is_pc && dbg->icons->disasm_pc.texture)
+		return &dbg->icons->disasm_pc;
+	return NULL;
 }
 
 static byte sdl_dbg_read_mem_byte(TilemCalc *calc, dword addr)
@@ -900,6 +1690,7 @@ static void sdl_dbg_start_input(TilemSdlDebugger *dbg,
 	if (!dbg)
 		return;
 
+	sdl_dbg_menu_close(dbg);
 	dbg->input_mode = mode;
 	dbg->input_len = 0;
 	dbg->input_buf[0] = '\0';
@@ -1372,6 +2163,7 @@ static void sdl_dbg_toggle_breakpoints_dialog(TilemSdlDebugger *dbg)
 	if (!dbg)
 		return;
 
+	sdl_dbg_menu_close(dbg);
 	dbg->show_breakpoints = !dbg->show_breakpoints;
 	dbg->input_error[0] = '\0';
 	if (!dbg->show_breakpoints)
@@ -1873,6 +2665,9 @@ TilemSdlDebugger *tilem_sdl_debugger_new(TilemCalcEmulator *emu)
 	dbg->show_breakpoints = FALSE;
 	dbg->bp_selected = 0;
 	dbg->input_mode = SDL_DBG_INPUT_NONE;
+	dbg->menu_open = FALSE;
+	dbg->menu_active = SDL_DBG_MENU_BAR_NONE;
+	dbg->menu_selected = -1;
 
 	tilem_config_get("debugger", "mem_logical/b=1", &mem_logical, NULL);
 	dbg->mem_logical = mem_logical;
@@ -1893,6 +2688,11 @@ void tilem_sdl_debugger_free(TilemSdlDebugger *dbg)
 		dbg->keypad.renderer = NULL;
 		dbg->keypad.window = NULL;
 		dbg->keypad.visible = FALSE;
+	}
+
+	if (dbg->icons) {
+		tilem_sdl_icons_free(dbg->icons);
+		dbg->icons = NULL;
 	}
 
 	if (dbg->window) {
@@ -1961,6 +2761,11 @@ void tilem_sdl_debugger_show(TilemSdlDebugger *dbg)
 			}
 		}
 
+		dbg->icons = tilem_sdl_icons_load(dbg->renderer);
+		if (dbg->icons && dbg->icons->app_surface)
+			SDL_SetWindowIcon(dbg->window,
+			                  dbg->icons->app_surface);
+
 		dbg->window_id = SDL_GetWindowID(dbg->window);
 		SDL_GetWindowSize(dbg->window,
 		                  &dbg->window_width,
@@ -1975,6 +2780,7 @@ void tilem_sdl_debugger_show(TilemSdlDebugger *dbg)
 	dbg->resume_on_hide = !dbg->emu->paused;
 	tilem_calc_emulator_pause(dbg->emu);
 	sdl_dbg_cancel_step_bp(dbg);
+	sdl_dbg_menu_close(dbg);
 
 	sdl_dbg_load_default_symbols(dbg);
 
@@ -1989,6 +2795,8 @@ void tilem_sdl_debugger_hide(TilemSdlDebugger *dbg)
 
 	if (dbg->input_mode != SDL_DBG_INPUT_NONE)
 		sdl_dbg_cancel_input(dbg);
+
+	sdl_dbg_menu_close(dbg);
 
 	if (dbg->keypad.visible)
 		sdl_dbg_keypad_hide(dbg);
@@ -2047,6 +2855,9 @@ static void sdl_dbg_handle_key(TilemSdlDebugger *dbg,
 	lines = layout.disasm_lines;
 	if (lines <= 0)
 		lines = 1;
+
+	if (dbg->menu_open && sdl_dbg_menu_handle_key(dbg, sym))
+		return;
 
 	if (dbg->input_mode != SDL_DBG_INPUT_NONE) {
 		if (sym == SDLK_ESCAPE) {
@@ -2148,17 +2959,27 @@ static void sdl_dbg_handle_key(TilemSdlDebugger *dbg,
 		return;
 	}
 
+	if (!sdl_dbg_is_paused(dbg)) {
+		if (sym == SDLK_ESCAPE) {
+			tilem_calc_emulator_pause(dbg->emu);
+			return;
+		}
+		if ((mods & KMOD_CTRL) && sym == SDLK_k) {
+			if (dbg->keypad.visible)
+				sdl_dbg_keypad_hide(dbg);
+			else
+				sdl_dbg_keypad_show(dbg);
+			return;
+		}
+		return;
+	}
+
 	if ((mods & KMOD_CTRL) && sym == SDLK_b) {
 		sdl_dbg_toggle_breakpoints_dialog(dbg);
 		return;
 	}
 	if ((mods & KMOD_CTRL) && sym == SDLK_l) {
-		char prefill[SDL_DEBUGGER_LINE_BUFSZ];
-		dword addr = dbg->disasm_cursor;
-		int addr_width = dbg->mem_logical ? 4 : 6;
-		snprintf(prefill, sizeof(prefill), "%0*X",
-		         addr_width, addr);
-		sdl_dbg_start_input(dbg, SDL_DBG_INPUT_GOTO, prefill);
+		sdl_dbg_start_goto(dbg);
 		return;
 	}
 	if ((mods & KMOD_CTRL) && sym == SDLK_m) {
@@ -2270,29 +3091,156 @@ static int sdl_dbg_line_from_y(TilemSdlDebugger *dbg, SDL_Rect rect, int y)
 	return line;
 }
 
-static void sdl_dbg_handle_mouse(TilemSdlDebugger *dbg,
-                                 const SDL_MouseButtonEvent *event)
+static gboolean sdl_dbg_handle_menu_mouse(TilemSdlDebugger *dbg,
+                                          const SDL_Event *event)
+{
+	TilemSdlDebuggerLayout layout;
+	TilemSdlMenuBar bar;
+	const TilemSdlDbgMenuItem *items;
+	size_t n_items = 0;
+	int menu_x;
+	int menu_y;
+	int menu_w;
+	int menu_h;
+	int idx;
+	int x;
+	int y;
+
+	if (!dbg || !event)
+		return FALSE;
+	if (dbg->input_mode != SDL_DBG_INPUT_NONE || dbg->show_breakpoints)
+		return FALSE;
+
+	if (event->type == SDL_MOUSEMOTION) {
+		x = event->motion.x;
+		y = event->motion.y;
+	}
+	else if (event->type == SDL_MOUSEBUTTONDOWN) {
+		if (event->button.button != SDL_BUTTON_LEFT)
+			return FALSE;
+		x = event->button.x;
+		y = event->button.y;
+	}
+	else {
+		return FALSE;
+	}
+
+	sdl_dbg_compute_layout(dbg, &layout);
+
+	if (event->type == SDL_MOUSEBUTTONDOWN) {
+		bar = sdl_dbg_menu_hit_test_bar(dbg, &layout, x, y);
+		if (bar != SDL_DBG_MENU_BAR_NONE) {
+			if (dbg->menu_open && dbg->menu_active == bar)
+				sdl_dbg_menu_close(dbg);
+			else
+				sdl_dbg_menu_open(dbg, bar);
+			return TRUE;
+		}
+
+		if (!dbg->menu_open)
+			return FALSE;
+
+		items = sdl_dbg_menu_items(dbg->menu_active, &n_items);
+		if (!items || n_items == 0) {
+			sdl_dbg_menu_close(dbg);
+			return TRUE;
+		}
+
+		sdl_dbg_menu_panel_bounds(dbg, &layout, dbg->menu_active,
+		                          &menu_x, &menu_y, &menu_w, &menu_h);
+		idx = sdl_dbg_menu_hit_test_items(dbg, items, n_items,
+		                                  menu_x, menu_y,
+		                                  menu_w, menu_h,
+		                                  x, y);
+		if (idx >= 0) {
+			dbg->menu_selected = idx;
+			if (sdl_dbg_menu_action_enabled(dbg,
+			                                items[idx].action)) {
+				sdl_dbg_menu_close(dbg);
+				sdl_dbg_handle_menu_action(
+					dbg, items[idx].action);
+			}
+			return TRUE;
+		}
+
+		sdl_dbg_menu_close(dbg);
+		return TRUE;
+	}
+
+	if (!dbg->menu_open)
+		return FALSE;
+
+	bar = sdl_dbg_menu_hit_test_bar(dbg, &layout, x, y);
+	if (bar != SDL_DBG_MENU_BAR_NONE && bar != dbg->menu_active) {
+		sdl_dbg_menu_open(dbg, bar);
+		return TRUE;
+	}
+
+	items = sdl_dbg_menu_items(dbg->menu_active, &n_items);
+	if (!items || n_items == 0)
+		return TRUE;
+
+	sdl_dbg_menu_panel_bounds(dbg, &layout, dbg->menu_active,
+	                          &menu_x, &menu_y, &menu_w, &menu_h);
+	idx = sdl_dbg_menu_hit_test_items(dbg, items, n_items,
+	                                  menu_x, menu_y,
+	                                  menu_w, menu_h,
+	                                  x, y);
+	dbg->menu_selected = idx;
+	return TRUE;
+}
+
+static gboolean sdl_dbg_handle_mouse(TilemSdlDebugger *dbg,
+                                     const SDL_MouseButtonEvent *event)
 {
 	TilemSdlDebuggerLayout layout;
 	int line;
 	dword addr;
+	TilemSdlDbgToolbarButton buttons[8];
+	int count;
+	int i;
 
-	if (dbg->show_breakpoints || dbg->input_mode != SDL_DBG_INPUT_NONE)
-		return;
+	if (dbg->show_breakpoints || dbg->input_mode != SDL_DBG_INPUT_NONE
+	    || dbg->menu_open)
+		return TRUE;
 
 	if (!dbg->emu || !dbg->emu->calc)
-		return;
+		return TRUE;
 
 	sdl_dbg_compute_layout(dbg, &layout);
+	if (event->button == SDL_BUTTON_LEFT
+	    && layout.toolbar_rect.h > 0
+	    && event->x >= layout.toolbar_rect.x
+	    && event->x < layout.toolbar_rect.x + layout.toolbar_rect.w
+	    && event->y >= layout.toolbar_rect.y
+	    && event->y < layout.toolbar_rect.y + layout.toolbar_rect.h) {
+		count = sdl_dbg_toolbar_layout(dbg, &layout, buttons,
+		                               (int) G_N_ELEMENTS(buttons));
+		for (i = 0; i < count; i++) {
+			SDL_Rect rect = buttons[i].rect;
+			if (event->x >= rect.x && event->x < rect.x + rect.w
+			    && event->y >= rect.y && event->y < rect.y + rect.h) {
+				if (sdl_dbg_menu_action_enabled(
+					    dbg, buttons[i].action))
+					sdl_dbg_handle_menu_action(
+						dbg, buttons[i].action);
+				return TRUE;
+			}
+		}
+	}
+
+	if (!sdl_dbg_is_paused(dbg))
+		return TRUE;
+
 	if (event->x < layout.disasm_rect.x
 	    || event->x >= layout.disasm_rect.x + layout.disasm_rect.w
 	    || event->y < layout.disasm_rect.y
 	    || event->y >= layout.disasm_rect.y + layout.disasm_rect.h)
-		return;
+		return FALSE;
 
 	line = sdl_dbg_line_from_y(dbg, layout.disasm_rect, event->y);
 	if (line < 0 || line >= layout.disasm_lines)
-		return;
+		return FALSE;
 
 	tilem_calc_emulator_lock(dbg->emu);
 	addr = sdl_dbg_address_at_line(dbg->emu->calc, dbg->dasm,
@@ -2305,6 +3253,7 @@ static void sdl_dbg_handle_mouse(TilemSdlDebugger *dbg,
 
 	if (event->button == SDL_BUTTON_RIGHT)
 		sdl_dbg_toggle_breakpoint(dbg, addr);
+	return TRUE;
 }
 
 static void sdl_dbg_handle_wheel(TilemSdlDebugger *dbg,
@@ -2313,10 +3262,13 @@ static void sdl_dbg_handle_wheel(TilemSdlDebugger *dbg,
 	TilemSdlDebuggerLayout layout;
 	int lines;
 
-	if (dbg->show_breakpoints || dbg->input_mode != SDL_DBG_INPUT_NONE)
+	if (dbg->show_breakpoints || dbg->input_mode != SDL_DBG_INPUT_NONE
+	    || dbg->menu_open)
 		return;
 
 	if (!dbg->emu || !dbg->emu->calc)
+		return;
+	if (!sdl_dbg_is_paused(dbg))
 		return;
 
 	sdl_dbg_compute_layout(dbg, &layout);
@@ -2366,7 +3318,12 @@ gboolean tilem_sdl_debugger_handle_event(TilemSdlDebugger *dbg,
 			}
 		}
 		return TRUE;
+	case SDL_MOUSEMOTION:
+		sdl_dbg_handle_menu_mouse(dbg, event);
+		return TRUE;
 	case SDL_MOUSEBUTTONDOWN:
+		if (sdl_dbg_handle_menu_mouse(dbg, event))
+			return TRUE;
 		sdl_dbg_handle_mouse(dbg, &event->button);
 		return TRUE;
 	case SDL_MOUSEWHEEL:
@@ -2389,6 +3346,263 @@ static void sdl_dbg_render_panel(SDL_Renderer *renderer, SDL_Rect rect)
 	SDL_RenderDrawRect(renderer, &rect);
 }
 
+static void sdl_dbg_render_toolbar(TilemSdlDebugger *dbg,
+                                   const TilemSdlDebuggerLayout *layout)
+{
+	TilemSdlDbgToolbarButton buttons[8];
+	int count;
+	int i;
+	SDL_Color border = { 80, 80, 80, 255 };
+	SDL_Color text = { 220, 220, 220, 255 };
+
+	if (!dbg || layout->toolbar_rect.h <= 0)
+		return;
+
+	count = sdl_dbg_toolbar_layout(dbg, layout, buttons,
+	                               (int) G_N_ELEMENTS(buttons));
+	for (i = 0; i < count; i++) {
+		gboolean enabled = sdl_dbg_menu_action_enabled(
+			dbg, buttons[i].action);
+		SDL_Rect rect = buttons[i].rect;
+		SDL_Rect dst;
+		Uint8 alpha = enabled ? 255 : 120;
+
+		SDL_SetRenderDrawColor(dbg->renderer, border.r, border.g,
+		                       border.b, border.a);
+		SDL_RenderDrawRect(dbg->renderer, &rect);
+
+		if (buttons[i].icon && buttons[i].icon->texture) {
+			dst.x = rect.x + (rect.w - buttons[i].icon->width) / 2;
+			dst.y = rect.y + (rect.h - buttons[i].icon->height) / 2;
+			dst.w = buttons[i].icon->width;
+			dst.h = buttons[i].icon->height;
+			SDL_SetTextureAlphaMod(buttons[i].icon->texture, alpha);
+			SDL_RenderCopy(dbg->renderer,
+			               buttons[i].icon->texture,
+			               NULL, &dst);
+			SDL_SetTextureAlphaMod(buttons[i].icon->texture, 255);
+		}
+		else if (buttons[i].label) {
+			SDL_Color color = text;
+			color.a = alpha;
+			sdl_dbg_draw_text(dbg,
+			                  rect.x + SDL_DEBUGGER_MENU_PADDING,
+			                  rect.y + (rect.h - dbg->line_height) / 2,
+			                  buttons[i].label, color);
+		}
+	}
+}
+
+static void sdl_dbg_draw_check(SDL_Renderer *renderer, int x, int y,
+                               int size, SDL_Color color)
+{
+	if (size <= 2)
+		return;
+
+	SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
+	SDL_RenderDrawLine(renderer, x, y + size / 2,
+	                   x + size / 3, y + size);
+	SDL_RenderDrawLine(renderer, x + size / 3, y + size,
+	                   x + size, y);
+}
+
+static void sdl_dbg_render_menubar(TilemSdlDebugger *dbg,
+                                   const TilemSdlDebuggerLayout *layout)
+{
+	SDL_Color text = { 230, 230, 230, 255 };
+	SDL_Color highlight = { 60, 110, 170, 255 };
+	SDL_Color bg = { 40, 40, 40, 255 };
+	SDL_Color border = { 90, 90, 90, 255 };
+	int text_h;
+	int i;
+
+	if (!dbg || !layout)
+		return;
+
+	SDL_SetRenderDrawColor(dbg->renderer, bg.r, bg.g, bg.b, bg.a);
+	SDL_RenderFillRect(dbg->renderer, &layout->menu_rect);
+	SDL_SetRenderDrawColor(dbg->renderer, border.r, border.g, border.b,
+	                       border.a);
+	SDL_RenderDrawLine(dbg->renderer,
+	                   layout->menu_rect.x,
+	                   layout->menu_rect.y + layout->menu_rect.h - 1,
+	                   layout->menu_rect.x + layout->menu_rect.w,
+	                   layout->menu_rect.y + layout->menu_rect.h - 1);
+
+	sdl_dbg_menu_bar_layout(dbg, layout);
+	text_h = dbg->font ? TTF_FontHeight(dbg->font) : dbg->line_height;
+	for (i = 0; i < SDL_DBG_MENU_BAR_COUNT; i++) {
+		SDL_Rect rect = dbg->menu_bar_items[i];
+		if (dbg->menu_open && dbg->menu_active == i) {
+			SDL_SetRenderDrawColor(dbg->renderer, highlight.r,
+			                       highlight.g, highlight.b,
+			                       highlight.a);
+			SDL_RenderFillRect(dbg->renderer, &rect);
+		}
+		sdl_dbg_draw_text(dbg,
+		                  rect.x + SDL_DEBUGGER_MENU_PADDING,
+		                  rect.y + (rect.h - text_h) / 2,
+		                  sdl_dbg_menu_bar_labels[i],
+		                  text);
+	}
+}
+
+static void sdl_dbg_render_menu_panel(TilemSdlDebugger *dbg,
+                                      const TilemSdlDbgMenuItem *items,
+                                      size_t n_items,
+                                      int menu_x, int menu_y,
+                                      int menu_w, int menu_h,
+                                      int selected)
+{
+	SDL_Color text_color = { 230, 230, 230, 255 };
+	SDL_Color disabled_color = { 140, 140, 140, 255 };
+	SDL_Color highlight = { 60, 110, 170, 255 };
+	SDL_Color bg = { 40, 40, 40, 240 };
+	SDL_Color border = { 90, 90, 90, 255 };
+	SDL_Rect menu_rect;
+	SDL_Rect item_rect;
+	int item_h;
+	int icon_col_w;
+	int icon_area_w;
+	int text_h;
+	size_t i;
+
+	if (!dbg || !items || n_items == 0)
+		return;
+
+	item_h = sdl_dbg_menu_item_height(dbg, items, n_items);
+	icon_col_w = sdl_dbg_menu_icon_column_width(dbg, items, n_items);
+	icon_area_w = (icon_col_w > 0) ? (icon_col_w - SDL_DEBUGGER_MENU_ICON_GAP) : 0;
+	text_h = dbg->font ? TTF_FontHeight(dbg->font) : dbg->line_height;
+
+	menu_rect.x = menu_x;
+	menu_rect.y = menu_y;
+	menu_rect.w = menu_w;
+	menu_rect.h = menu_h;
+
+	SDL_SetRenderDrawColor(dbg->renderer, bg.r, bg.g, bg.b, bg.a);
+	SDL_RenderFillRect(dbg->renderer, &menu_rect);
+	SDL_SetRenderDrawColor(dbg->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(dbg->renderer, &menu_rect);
+
+	for (i = 0; i < n_items; i++) {
+		item_rect.x = menu_x;
+		item_rect.y = menu_y + SDL_DEBUGGER_MENU_SPACING
+			+ (int) i * item_h;
+		item_rect.w = menu_w;
+		item_rect.h = item_h;
+
+		if (items[i].separator) {
+			SDL_SetRenderDrawColor(dbg->renderer, border.r,
+			                       border.g, border.b, border.a);
+			SDL_RenderDrawLine(dbg->renderer,
+			                   item_rect.x + SDL_DEBUGGER_MENU_PADDING,
+			                   item_rect.y + item_rect.h / 2,
+			                   item_rect.x + item_rect.w
+			                       - SDL_DEBUGGER_MENU_PADDING,
+			                   item_rect.y + item_rect.h / 2);
+			continue;
+		}
+
+		if ((int) i == selected) {
+			SDL_SetRenderDrawColor(dbg->renderer, highlight.r,
+			                       highlight.g, highlight.b,
+			                       highlight.a);
+			SDL_RenderFillRect(dbg->renderer, &item_rect);
+		}
+
+		if (icon_area_w > 0) {
+			const TilemSdlIcon *icon =
+				sdl_dbg_menu_item_icon(dbg, items[i].action);
+			gboolean enabled = sdl_dbg_menu_action_enabled(
+				dbg, items[i].action);
+			SDL_Color item_color = enabled ? text_color
+			                              : disabled_color;
+			if (icon && icon->texture) {
+				SDL_Rect dst;
+
+				dst.x = item_rect.x + SDL_DEBUGGER_MENU_PADDING
+				        + (icon_area_w - icon->width) / 2;
+				dst.y = item_rect.y + (item_rect.h - icon->height) / 2;
+				dst.w = icon->width;
+				dst.h = icon->height;
+				SDL_SetTextureAlphaMod(icon->texture,
+				                       enabled ? 255 : 120);
+				SDL_RenderCopy(dbg->renderer, icon->texture,
+				               NULL, &dst);
+				SDL_SetTextureAlphaMod(icon->texture, 255);
+			}
+			else if (items[i].flags & (SDL_DBG_MENU_FLAG_TOGGLE
+			                           | SDL_DBG_MENU_FLAG_RADIO)) {
+				if (sdl_dbg_menu_action_checked(dbg,
+				                                &items[i])) {
+					int size = MIN(icon_area_w,
+					               item_rect.h
+					                   - SDL_DEBUGGER_MENU_PADDING * 2);
+					int cx = item_rect.x
+					         + SDL_DEBUGGER_MENU_PADDING
+					         + (icon_area_w - size) / 2;
+					int cy = item_rect.y
+					         + (item_rect.h - size) / 2;
+					if (items[i].flags & SDL_DBG_MENU_FLAG_RADIO) {
+						SDL_Rect dot = { cx + size / 4,
+						                 cy + size / 4,
+						                 size / 2,
+						                 size / 2 };
+						SDL_SetRenderDrawColor(
+							dbg->renderer,
+							item_color.r,
+							item_color.g,
+							item_color.b,
+							item_color.a);
+						SDL_RenderFillRect(dbg->renderer, &dot);
+					}
+					else {
+						sdl_dbg_draw_check(
+							dbg->renderer,
+							cx, cy, size, item_color);
+					}
+				}
+			}
+		}
+
+		SDL_Color color = sdl_dbg_menu_action_enabled(dbg,
+		                                              items[i].action)
+			? text_color : disabled_color;
+		sdl_dbg_draw_text(dbg,
+		                  item_rect.x + SDL_DEBUGGER_MENU_PADDING
+		                      + icon_col_w,
+		                  item_rect.y + (item_rect.h - text_h) / 2,
+		                  items[i].label,
+		                  color);
+	}
+}
+
+static void sdl_dbg_render_menu(TilemSdlDebugger *dbg,
+                                const TilemSdlDebuggerLayout *layout)
+{
+	const TilemSdlDbgMenuItem *items;
+	size_t n_items;
+	int menu_x;
+	int menu_y;
+	int menu_w;
+	int menu_h;
+
+	if (!dbg || !dbg->menu_open || dbg->menu_active == SDL_DBG_MENU_BAR_NONE)
+		return;
+
+	items = sdl_dbg_menu_items(dbg->menu_active, &n_items);
+	if (!items || n_items == 0)
+		return;
+
+	sdl_dbg_menu_panel_bounds(dbg, layout, dbg->menu_active,
+	                          &menu_x, &menu_y, &menu_w, &menu_h);
+	sdl_dbg_render_menu_panel(dbg, items, n_items,
+	                          menu_x, menu_y, menu_w, menu_h,
+	                          dbg->menu_selected);
+}
+
 void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 {
 	TilemSdlDebuggerLayout layout;
@@ -2397,6 +3611,10 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 	SDL_Color highlight = { 60, 110, 170, 255 };
 	SDL_Color pc_color = { 255, 210, 120, 255 };
 	SDL_Color bp_color = { 255, 120, 120, 255 };
+	SDL_Color panel_text = text;
+	SDL_Color panel_muted = muted;
+	SDL_Color panel_pc = pc_color;
+	SDL_Color panel_bp = bp_color;
 	TilemCalc *calc;
 	TilemZ80Regs regs;
 	int i;
@@ -2423,6 +3641,13 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 	calc = dbg->emu->calc;
 
 	sdl_dbg_compute_layout(dbg, &layout);
+
+	if (!dbg->emu->paused) {
+		panel_text.r = panel_text.g = panel_text.b = 150;
+		panel_muted.r = panel_muted.g = panel_muted.b = 110;
+		panel_pc = panel_text;
+		panel_bp = panel_text;
+	}
 
 	tilem_calc_emulator_lock(dbg->emu);
 	disasm_addr_width = dbg->mem_logical ? 4
@@ -2451,8 +3676,10 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 	for (i = 0; i < layout.disasm_lines; i++) {
 		dword next;
 		char textbuf[SDL_DEBUGGER_LINE_BUFSZ];
-		char cursor = (addr == dbg->disasm_cursor) ? '>' : ' ';
-		char bp = (sdl_dbg_find_exec_breakpoint(
+		gboolean show_markers = !sdl_dbg_has_disasm_icons(dbg);
+		char cursor = (show_markers && addr == dbg->disasm_cursor)
+		              ? '>' : ' ';
+		char bp = (show_markers && sdl_dbg_find_exec_breakpoint(
 		               dbg, addr, dbg->mem_logical) >= 0)
 		          ? '*' : ' ';
 
@@ -2460,11 +3687,20 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 		                         dbg->mem_logical ? 0 : 1,
 		                         addr, &next,
 		                         textbuf, sizeof(textbuf));
-		snprintf(disasm_lines[i], sizeof(disasm_lines[i]),
-		         "%c%c%0*X %s",
-		         cursor, bp, disasm_addr_width,
-		         dbg->mem_logical ? (addr & 0xffff) : addr,
-		         textbuf);
+		if (show_markers) {
+			snprintf(disasm_lines[i], sizeof(disasm_lines[i]),
+			         "%c%c%0*X %s",
+			         cursor, bp, disasm_addr_width,
+			         dbg->mem_logical ? (addr & 0xffff) : addr,
+			         textbuf);
+		}
+		else {
+			snprintf(disasm_lines[i], sizeof(disasm_lines[i]),
+			         "%0*X %s",
+			         disasm_addr_width,
+			         dbg->mem_logical ? (addr & 0xffff) : addr,
+			         textbuf);
+		}
 		disasm_addrs[i] = addr;
 		disasm_count++;
 
@@ -2521,17 +3757,9 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 	SDL_SetRenderDrawColor(dbg->renderer, 20, 20, 20, 255);
 	SDL_RenderClear(dbg->renderer);
 
-	if (dbg->emu->paused)
-		snprintf(line, sizeof(line), "Paused  PC=%04X  %s",
-		         pc, dbg->mem_logical ? "Logical" : "Absolute");
-	else
-		snprintf(line, sizeof(line), "Running  PC=%04X  %s",
-		         pc, dbg->mem_logical ? "Logical" : "Absolute");
-	sdl_dbg_draw_text(dbg, SDL_DEBUGGER_MARGIN, SDL_DEBUGGER_MARGIN,
-	                  SDL_DEBUGGER_TITLE, text);
-	sdl_dbg_draw_text(dbg, SDL_DEBUGGER_MARGIN,
-	                  SDL_DEBUGGER_MARGIN + dbg->line_height,
-	                  line, muted);
+	sdl_dbg_render_menubar(dbg, &layout);
+	if (layout.toolbar_rect.h > 0)
+		sdl_dbg_render_toolbar(dbg, &layout);
 
 	sdl_dbg_render_panel(dbg->renderer, layout.disasm_rect);
 	sdl_dbg_render_panel(dbg->renderer, layout.regs_rect);
@@ -2539,14 +3767,19 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 	sdl_dbg_render_panel(dbg->renderer, layout.mem_rect);
 
 	for (i = 0; i < disasm_count; i++) {
-		SDL_Color color = text;
+		SDL_Color color = panel_text;
+		const TilemSdlIcon *icon = NULL;
 		int y = layout.disasm_rect.y + i * dbg->line_height;
-		if (disasm_addrs[i]
-		    == (dbg->mem_logical ? pc : pc_phys))
-			color = pc_color;
-		if (sdl_dbg_find_exec_breakpoint(dbg, disasm_addrs[i],
-		                                 dbg->mem_logical) >= 0)
-			color = bp_color;
+		gboolean is_pc = (disasm_addrs[i]
+		                  == (dbg->mem_logical ? pc : pc_phys));
+		gboolean is_bp = (sdl_dbg_find_exec_breakpoint(
+		                      dbg, disasm_addrs[i],
+		                      dbg->mem_logical) >= 0);
+
+		if (is_pc)
+			color = panel_pc;
+		if (is_bp)
+			color = panel_bp;
 		if (disasm_addrs[i] == dbg->disasm_cursor) {
 			SDL_Rect hl = layout.disasm_rect;
 			hl.y = y;
@@ -2556,8 +3789,21 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 			                       highlight.a);
 			SDL_RenderFillRect(dbg->renderer, &hl);
 		}
+		icon = sdl_dbg_pick_disasm_icon(dbg, is_pc, is_bp);
+		if (icon && icon->texture) {
+			SDL_Rect dst;
+
+			dst.x = layout.disasm_rect.x + SDL_DEBUGGER_MARGIN;
+			dst.y = y + (dbg->line_height - icon->height) / 2;
+			dst.w = icon->width;
+			dst.h = icon->height;
+			SDL_RenderCopy(dbg->renderer, icon->texture, NULL,
+			               &dst);
+		}
+
 		sdl_dbg_draw_text(dbg,
-		                  layout.disasm_rect.x + SDL_DEBUGGER_MARGIN,
+		                  layout.disasm_rect.x + SDL_DEBUGGER_MARGIN
+		                      + layout.disasm_icon_w,
 		                  y, disasm_lines[i], color);
 	}
 
@@ -2583,7 +3829,7 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
 			                  layout.regs_rect.y
 			                      + dbg->line_height * line_idx,
-			                  line, text);
+			                  line, panel_text);
 			line_idx++;
 		}
 		if (line_idx < reg_lines) {
@@ -2593,7 +3839,7 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
 			                  layout.regs_rect.y
 			                      + dbg->line_height * line_idx,
-			                  line, text);
+			                  line, panel_text);
 			line_idx++;
 		}
 		if (line_idx < reg_lines) {
@@ -2603,7 +3849,7 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
 			                  layout.regs_rect.y
 			                      + dbg->line_height * line_idx,
-			                  line, text);
+			                  line, panel_text);
 			line_idx++;
 		}
 		if (line_idx < reg_lines) {
@@ -2613,7 +3859,7 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
 			                  layout.regs_rect.y
 			                      + dbg->line_height * line_idx,
-			                  line, text);
+			                  line, panel_text);
 			line_idx++;
 		}
 		if (line_idx < reg_lines) {
@@ -2623,7 +3869,7 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
 			                  layout.regs_rect.y
 			                      + dbg->line_height * line_idx,
-			                  line, text);
+			                  line, panel_text);
 			line_idx++;
 		}
 		if (line_idx < reg_lines) {
@@ -2633,7 +3879,7 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
 			                  layout.regs_rect.y
 			                      + dbg->line_height * line_idx,
-			                  line, text);
+			                  line, panel_text);
 			line_idx++;
 		}
 		if (line_idx < reg_lines) {
@@ -2643,7 +3889,7 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
 			                  layout.regs_rect.y
 			                      + dbg->line_height * line_idx,
-			                  line, text);
+			                  line, panel_text);
 			line_idx++;
 		}
 		if (line_idx < reg_lines) {
@@ -2653,7 +3899,7 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
 			                  layout.regs_rect.y
 			                      + dbg->line_height * line_idx,
-			                  line, text);
+			                  line, panel_text);
 			line_idx++;
 		}
 		if (line_idx < reg_lines) {
@@ -2661,7 +3907,7 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
 			                  layout.regs_rect.y
 			                      + dbg->line_height * line_idx,
-			                  flags, muted);
+			                  flags, panel_muted);
 		}
 	}
 
@@ -2677,16 +3923,17 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 			SDL_RenderFillRect(dbg->renderer, &hl);
 		}
 		sdl_dbg_draw_text(dbg, layout.stack_rect.x + SDL_DEBUGGER_MARGIN,
-		                  y, stack_lines[i], text);
+		                  y, stack_lines[i], panel_text);
 	}
 
 	for (i = 0; i < mem_count; i++) {
 		int y = layout.mem_rect.y + i * dbg->line_height;
 		sdl_dbg_draw_text(dbg, layout.mem_rect.x + SDL_DEBUGGER_MARGIN,
-		                  y, mem_lines[i], text);
+		                  y, mem_lines[i], panel_text);
 	}
 
 	sdl_dbg_render_breakpoints(dbg);
+	sdl_dbg_render_menu(dbg, &layout);
 
 	SDL_RenderPresent(dbg->renderer);
 
