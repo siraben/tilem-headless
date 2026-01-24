@@ -33,6 +33,9 @@ SDL2_LIBS = $(shell pkg-config --libs sdl2)
 SDL2_TTF_CFLAGS = $(shell pkg-config --cflags SDL2_ttf)
 SDL2_TTF_LIBS = $(shell pkg-config --libs SDL2_ttf)
 
+SDL2_IMAGE_CFLAGS = $(shell pkg-config --cflags SDL2_image)
+SDL2_IMAGE_LIBS = $(shell pkg-config --libs SDL2_image)
+
 TICALCS_CFLAGS = 
 TICALCS_LIBS = 
 
@@ -78,8 +81,8 @@ objects = tilem2.o \
 	preferences.o \
 	sdldebugger.o \
 	sdlicons.o \
+	sdlskin.o \
 	sdlui.o \
-	sdlpixbuf.o \
 	sdlscreenshot.o \
 	sendfile.o \
 	screenshot.o \
@@ -90,17 +93,17 @@ objects = tilem2.o \
 	tool.o \
 	$(gui_extra_objects)
 
-libs = $(TILEMDB_LIBS) $(TILEMCORE_LIBS) $(GTK_LIBS) $(SDL2_LIBS) $(SDL2_TTF_LIBS) $(TICALCS_LIBS) $(LIBS)
+libs = $(TILEMDB_LIBS) $(TILEMCORE_LIBS) $(GTK_LIBS) $(SDL2_LIBS) $(SDL2_TTF_LIBS) $(SDL2_IMAGE_LIBS) $(TICALCS_LIBS) $(LIBS)
 
 compile = $(CC) -I$(top_builddir) -I$(srcdir) -I$(top_srcdir)/headless \
 	$(CFLAGS) $(CPPFLAGS) $(DEFS) \
 	$(TILEMCORE_CFLAGS) $(TILEMDB_CFLAGS) \
-	$(GTK_CFLAGS) $(SDL2_CFLAGS) $(SDL2_TTF_CFLAGS) $(TICALCS_CFLAGS)
+	$(GTK_CFLAGS) $(SDL2_CFLAGS) $(SDL2_TTF_CFLAGS) $(SDL2_IMAGE_CFLAGS) $(TICALCS_CFLAGS)
 
 link = $(CC) $(CFLAGS) $(LDFLAGS) $(GUI_LDFLAGS) 
 
 common_headers = ../config.h ../emu/tilem.h ../db/tilemdb.h \
-	gui.h emulator.h debugger.h emuwin.h skinops.h animation.h \
+	gui.h varentry.h emulator.h debugger.h emuwin.h skinops.h animation.h \
 	gtk-compat.h msgbox.h fixedtreeview.h
 
 all: tilem2
@@ -157,15 +160,14 @@ emuwin.o: emuwin.c $(common_headers)
 	$(compile) -c $(srcdir)/emuwin.c
 
 # SDL2 UI
-sdlui.o: sdlui.c sdlui.h sdlicons.h $(common_headers)
+sdlui.o: sdlui.c sdlui.h sdlicons.h sdlskin.h $(common_headers)
 	$(compile) -c $(srcdir)/sdlui.c
 
 sdldebugger.o: sdldebugger.c sdldebugger.h sdlicons.h $(common_headers)
 	$(compile) -c $(srcdir)/sdldebugger.c
 
-sdlpixbuf.o: sdlpixbuf.c sdlpixbuf.h $(common_headers)
-	$(compile) -c $(srcdir)/sdlpixbuf.c
-
+sdlskin.o: sdlskin.c sdlskin.h $(common_headers)
+	$(compile) -c $(srcdir)/sdlskin.c
 sdlicons.o: sdlicons.c sdlicons.h files.h $(common_headers)
 	$(compile) -c $(srcdir)/sdlicons.c
 

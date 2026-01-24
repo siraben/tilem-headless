@@ -25,27 +25,7 @@
 #include "debugger.h"
 
 #include "gtk-compat.h"
-
-/* This struture is a wrapper for VarEntry with additionnal informations used by tilem */
-typedef struct {
-	int model;
-
-	VarEntry *ve;   	/* Original variable info retrieved
-	                	   from calculator */
-	int slot;       	/* Slot number */
-
-	/* Strings for display (UTF-8) */
-	char *name_str; 	/* Variable name */
-	char *type_str; 	/* Variable type */
-	char *slot_str; 	/* Program slot */
-	char *file_ext; 	/* Default file extension */
-	char *filetype_desc; 	/* File format description */
-
-	int size;            	/* Variable size */
-	gboolean archived;   	/* Is archived */
-	gboolean can_group;  	/* Can be stored in group file */
-
-} TilemVarEntry;
+#include "varentry.h"
 
 /* Screenshot view (widgets and flags) */
 typedef struct _TilemScreenshotDialog {
@@ -287,6 +267,13 @@ gboolean send_file_main(TilemCalcEmulator *emu, gpointer data);
 
 /* Request directory listing. */
 void tilem_link_get_dirlist(TilemCalcEmulator *emu);
+void tilem_link_get_dirlist_with_callback(TilemCalcEmulator *emu,
+                                          gboolean no_gui,
+                                          void (*callback)(TilemCalcEmulator *emu,
+                                                           GSList *list,
+                                                           const char *error_message,
+                                                           gpointer data),
+                                          gpointer data);
 
 /* Get the calc model as needed by ticalcs functions */
 int get_calc_model(TilemCalc *calc);

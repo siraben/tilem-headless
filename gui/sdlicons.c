@@ -22,8 +22,8 @@
 #endif
 
 #include <SDL.h>
+#include <SDL_image.h>
 #include <glib.h>
-#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -187,74 +187,8 @@ static GPtrArray *sdl_icon_pixmap_dirs(void)
 	return dirs;
 }
 
-static SDL_Surface *sdl_surface_from_pixbuf(GdkPixbuf *pixbuf)
-{
-	GdkPixbuf *rgba;
-	guchar *pixels;
-	int width;
-	int height;
-	int rowstride;
-	SDL_Surface *surface;
-	Uint32 rmask;
-	Uint32 gmask;
-	Uint32 bmask;
-	Uint32 amask;
-	int y;
-
-	if (!pixbuf)
-		return NULL;
-
-	if (gdk_pixbuf_get_has_alpha(pixbuf))
-		rgba = g_object_ref(pixbuf);
-	else
-		rgba = gdk_pixbuf_add_alpha(pixbuf, FALSE, 0, 0, 0);
-
-	if (!rgba)
-		return NULL;
-
-	width = gdk_pixbuf_get_width(rgba);
-	height = gdk_pixbuf_get_height(rgba);
-	rowstride = gdk_pixbuf_get_rowstride(rgba);
-	pixels = gdk_pixbuf_get_pixels(rgba);
-
-#if SDL_BYTEORDER == SDL_BIG_ENDIAN
-	rmask = 0xff000000;
-	gmask = 0x00ff0000;
-	bmask = 0x0000ff00;
-	amask = 0x000000ff;
-#else
-	rmask = 0x000000ff;
-	gmask = 0x0000ff00;
-	bmask = 0x00ff0000;
-	amask = 0xff000000;
-#endif
-
-	surface = SDL_CreateRGBSurface(0, width, height, 32,
-	                               rmask, gmask, bmask, amask);
-	if (!surface) {
-		g_object_unref(rgba);
-		return NULL;
-	}
-
-	if (SDL_MUSTLOCK(surface))
-		SDL_LockSurface(surface);
-
-	for (y = 0; y < height; y++) {
-		memcpy((Uint8 *) surface->pixels + y * surface->pitch,
-		       pixels + y * rowstride,
-		       (size_t) width * 4);
-	}
-
-	if (SDL_MUSTLOCK(surface))
-		SDL_UnlockSurface(surface);
-
-	g_object_unref(rgba);
-	return surface;
-}
-
 static SDL_Surface *sdl_try_icon_file(const char *path)
 {
-	GdkPixbuf *pixbuf;
 	SDL_Surface *surface;
 
 	if (!path)
@@ -262,12 +196,7 @@ static SDL_Surface *sdl_try_icon_file(const char *path)
 	if (!g_file_test(path, G_FILE_TEST_IS_REGULAR))
 		return NULL;
 
-	pixbuf = gdk_pixbuf_new_from_file(path, NULL);
-	if (!pixbuf)
-		return NULL;
-
-	surface = sdl_surface_from_pixbuf(pixbuf);
-	g_object_unref(pixbuf);
+	surface = IMG_Load(path);
 	return surface;
 }
 
@@ -277,7 +206,6 @@ static SDL_Surface *sdl_load_icon_surface(const char *icons_root,
                                           const int *sizes,
                                           int n_sizes)
 {
-	GdkPixbuf *pixbuf;
 	SDL_Surface *surface = NULL;
 	char *filename;
 	int i;
@@ -300,13 +228,8 @@ static SDL_Surface *sdl_load_icon_surface(const char *icons_root,
 			continue;
 		}
 
-		pixbuf = gdk_pixbuf_new_from_file(path, NULL);
+		surface = sdl_try_icon_file(path);
 		g_free(path);
-		if (!pixbuf)
-			continue;
-
-		surface = sdl_surface_from_pixbuf(pixbuf);
-		g_object_unref(pixbuf);
 		if (surface)
 			break;
 	}
@@ -351,13 +274,11 @@ static SDL_Surface *sdl_load_theme_icon_surface(const char *const *names,
 	for (n = 0; n < n_names && !surface; n++) {
 		const char *name = names[n];
 		char *png_name;
-		char *svg_name;
 
 		if (!name || !*name)
 			continue;
 
 		png_name = g_strconcat(name, ".png", NULL);
-		svg_name = g_strconcat(name, ".svg", NULL);
 
 		for (i = 0; i < (int) theme_dirs->len && !surface; i++) {
 			const char *base = g_ptr_array_index(theme_dirs, i);
@@ -381,13 +302,6 @@ static SDL_Surface *sdl_load_theme_icon_surface(const char *const *names,
 						if (surface)
 							break;
 
-						path = g_build_filename(
-							base, themes[t],
-							size_dir,
-							categories[c],
-							svg_name, NULL);
-						surface = sdl_try_icon_file(path);
-						g_free(path);
 					}
 				}
 			}
@@ -401,13 +315,9 @@ static SDL_Surface *sdl_load_theme_icon_surface(const char *const *names,
 			if (surface)
 				break;
 
-			path = g_build_filename(base, svg_name, NULL);
-			surface = sdl_try_icon_file(path);
-			g_free(path);
 		}
 
 		g_free(png_name);
-		g_free(svg_name);
 	}
 
 	g_ptr_array_free(theme_dirs, TRUE);

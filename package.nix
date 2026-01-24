@@ -6,6 +6,7 @@
   gtk2,
   SDL2,
   SDL2_ttf,
+  SDL2_image,
   libticonv,
   libtifiles2,
   libticables2,
@@ -22,6 +23,7 @@ stdenv.mkDerivation rec {
     gtk2
     SDL2
     SDL2_ttf
+    SDL2_image
     libticonv
     libtifiles2
     libticables2

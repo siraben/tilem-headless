@@ -129,6 +129,25 @@ You must install SDL2_ttf (including the -dev/-devel packages if
 appropriate.)])
 fi
 
+# SDL2_image
+
+PKG_CHECK_MODULES(SDL2_IMAGE, SDL2_image >= 2.0.0,
+                  [ have_sdl2_image=maybe ], [ have_sdl2_image=no ])
+
+if test "x$have_sdl2_image" = "xmaybe" ; then
+  with_flags(SDL2_IMAGE,
+    [ AC_CHECK_FUNC(IMG_Init, [ have_sdl2_image=yes ], [ have_sdl2_image=no ]) ])
+fi
+
+if test "x$have_sdl2_image" != "xyes" ; then
+  AC_MSG_ERROR([SDL2_image not found or not usable.
+
+$SDL2_IMAGE_PKG_ERRORS
+
+You must install SDL2_image (including the -dev/-devel packages if
+appropriate.)])
+fi
+
 # Libticalcs2 and related libraries
 
 PKG_CHECK_MODULES(TICALCS, ticalcs2 ticables2 tifiles2 ticonv,

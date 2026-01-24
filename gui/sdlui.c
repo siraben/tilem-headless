@@ -22,6 +22,7 @@
 #endif
 
 #include <SDL.h>
+#include <SDL_image.h>
 #include <SDL_ttf.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,20 +37,37 @@
 
 #include "sdlui.h"
 #include "files.h"
-#include "skinops.h"
-#include "sdlpixbuf.h"
+#include "sdlskin.h"
 #include "sdlicons.h"
 #include "sdlscreenshot.h"
 #include "sdldebugger.h"
 #include "ti81prg.h"
+#include "varentry.h"
+#include "emucore.h"
 
 void tilem_config_get(const char *group, const char *option, ...);
 void tilem_config_set(const char *group, const char *option, ...);
 void tilem_link_send_file(TilemCalcEmulator *emu, const char *filename,
                           int slot, gboolean first, gboolean last);
+void tilem_link_receive_file(TilemCalcEmulator *emu,
+                             const TilemVarEntry *varentry,
+                             const char* destination);
+void tilem_link_receive_group(TilemCalcEmulator *emu,
+                              GSList *entries,
+                              const char *destination);
 void tilem_link_receive_all(TilemCalcEmulator *emu,
                             const char *destination);
+void tilem_link_get_dirlist_with_callback(TilemCalcEmulator *emu,
+                                          gboolean no_gui,
+                                          void (*callback)(TilemCalcEmulator *emu,
+                                                           GSList *list,
+                                                           const char *error_message,
+                                                           gpointer data),
+                                          gpointer data);
 int name_to_model(const char *name);
+int get_calc_model(TilemCalc *calc);
+char *utf8_to_filename(const char *utf8str);
+char *get_default_filename(const TilemVarEntry *tve);
 
 #define SDL_LCD_GAMMA 2.2
 #define SDL_FRAME_DELAY_MS 16
@@ -60,12 +78,34 @@ int name_to_model(const char *name);
 #define SDL_MENU_ICON_GAP 6
 
 typedef struct {
+	gboolean visible;
+	char **filenames;
+	int nfiles;
+	int *slots;
+	TI81ProgInfo info[TI81_SLOT_MAX + 1];
+	int selected;
+	int top;
+} TilemSdlSlotDialog;
+
+typedef struct {
+	gboolean visible;
+	gboolean refresh_pending;
+	gboolean is_81;
+	gboolean use_group;
+	int selected;
+	int top;
+	int hover;
+	GPtrArray *entries;
+	GArray *selected_flags;
+} TilemSdlReceiveDialog;
+
+typedef struct {
 	TilemCalcEmulator *emu;
 	SDL_Window *window;
 	SDL_Renderer *renderer;
 	SDL_Texture *skin_texture;
 	SDL_Texture *lcd_texture;
-	SKIN_INFOS *skin;
+	TilemSdlSkin *skin;
 	char *skin_file_name;
 	gboolean skin_disabled;
 	gboolean skin_locked;
@@ -97,8 +137,13 @@ typedef struct {
 	int submenu_selected;
 	gboolean prefs_visible;
 	int prefs_hover;
+	TilemSdlSlotDialog slot_dialog;
+	TilemSdlReceiveDialog receive_dialog;
+	GPtrArray *drop_files;
+	gboolean drop_active;
 	TTF_Font *menu_font;
 	gboolean ttf_ready;
+	gboolean image_ready;
 	int keypress_keycodes[64];
 	int sequence_keycode;
 	TilemSdlDebugger *debugger;
@@ -164,6 +209,31 @@ typedef struct {
 	int speed_header_y;
 	int display_header_y;
 } TilemSdlPrefsLayout;
+
+typedef struct {
+	SDL_Rect panel;
+	SDL_Rect list_rect;
+	SDL_Rect send_rect;
+	SDL_Rect cancel_rect;
+	int row_h;
+	int text_h;
+	int padding;
+} TilemSdlSlotLayout;
+
+typedef struct {
+	SDL_Rect panel;
+	SDL_Rect list_rect;
+	SDL_Rect refresh_rect;
+	SDL_Rect save_rect;
+	SDL_Rect cancel_rect;
+	SDL_Rect mode_label_rect;
+	SDL_Rect mode_sep_rect;
+	SDL_Rect mode_group_rect;
+	int row_h;
+	int header_h;
+	int text_h;
+	int padding;
+} TilemSdlReceiveLayout;
 
 static const TilemSdlMenuItem sdl_menu_items[] = {
 	{ "Send File...", SDL_MENU_SEND_FILE, FALSE,
@@ -897,6 +967,8 @@ static void sdl_show_message(TilemSdlUi *ui, const char *title,
 	                         ui ? ui->window : NULL);
 }
 
+static void sdl_init_image(TilemSdlUi *ui);
+static void sdl_shutdown_image(TilemSdlUi *ui);
 static void sdl_init_ttf(TilemSdlUi *ui);
 static void sdl_shutdown_ttf(TilemSdlUi *ui);
 
@@ -1110,6 +1182,271 @@ static char *sdl_native_file_dialog(const char *title,
 	return NULL;
 }
 
+static char **sdl_split_output_lines(const char *output)
+{
+	GPtrArray *paths;
+	char **lines;
+	int i;
+
+	if (!output || !*output)
+		return NULL;
+
+	paths = g_ptr_array_new_with_free_func(g_free);
+	lines = g_strsplit(output, "\n", -1);
+	for (i = 0; lines && lines[i]; i++) {
+		if (!lines[i][0])
+			continue;
+		g_ptr_array_add(paths, g_strdup(lines[i]));
+	}
+	g_strfreev(lines);
+
+	if (paths->len == 0) {
+		g_ptr_array_free(paths, TRUE);
+		return NULL;
+	}
+
+	g_ptr_array_add(paths, NULL);
+	return (char **) g_ptr_array_free(paths, FALSE);
+}
+
+static char **sdl_native_file_dialog_multi(const char *title,
+                                           const char *suggest_dir,
+                                           gboolean *used_native)
+{
+	if (used_native)
+		*used_native = FALSE;
+
+#ifdef __APPLE__
+	{
+		char *escaped_title = sdl_applescript_escape(title);
+		char *escaped_dir = sdl_applescript_escape(suggest_dir);
+		GString *script = g_string_new(NULL);
+		char *argv[4];
+		char *result;
+		char **paths;
+
+		g_string_append_printf(script,
+		                       "set out to \"\"\n"
+		                       "set files to choose file with prompt \"%s\"",
+		                       escaped_title);
+		if (escaped_dir && *escaped_dir) {
+			g_string_append_printf(script,
+			                       " default location POSIX file \"%s\"",
+			                       escaped_dir);
+		}
+		g_string_append(script,
+		                " with multiple selections allowed\n"
+		                "repeat with f in files\n"
+		                "set out to out & POSIX path of f & \"\\n\"\n"
+		                "end repeat\n"
+		                "return out");
+
+		argv[0] = (char *)"osascript";
+		argv[1] = (char *)"-e";
+		argv[2] = script->str;
+		argv[3] = NULL;
+
+		if (used_native)
+			*used_native = TRUE;
+		result = sdl_spawn_capture(argv);
+		paths = sdl_split_output_lines(result);
+
+		g_free(result);
+		g_string_free(script, TRUE);
+		g_free(escaped_title);
+		g_free(escaped_dir);
+		return paths;
+	}
+#elif defined(__linux__)
+	{
+		char *prog = g_find_program_in_path("zenity");
+		char *result = NULL;
+		char *filename = NULL;
+		char **paths = NULL;
+
+		if (prog) {
+			GPtrArray *argv = g_ptr_array_new();
+
+			g_ptr_array_add(argv, prog);
+			g_ptr_array_add(argv, (char *)"--file-selection");
+			g_ptr_array_add(argv, (char *)"--multiple");
+			g_ptr_array_add(argv, (char *)"--separator");
+			g_ptr_array_add(argv, (char *)"\n");
+			g_ptr_array_add(argv, (char *)"--title");
+			g_ptr_array_add(argv, (char *)title);
+			if (suggest_dir && *suggest_dir) {
+				filename = g_strconcat(suggest_dir,
+				                       G_DIR_SEPARATOR_S,
+				                       NULL);
+				g_ptr_array_add(argv, (char *)"--filename");
+				g_ptr_array_add(argv, filename);
+			}
+			g_ptr_array_add(argv, NULL);
+
+			if (used_native)
+				*used_native = TRUE;
+			result = sdl_spawn_capture((char **) argv->pdata);
+			paths = sdl_split_output_lines(result);
+
+			g_free(result);
+			g_ptr_array_free(argv, TRUE);
+			g_free(filename);
+			g_free(prog);
+			return paths;
+		}
+
+		prog = g_find_program_in_path("kdialog");
+		if (prog) {
+			GPtrArray *argv = g_ptr_array_new();
+			char *path = NULL;
+
+			g_ptr_array_add(argv, prog);
+			g_ptr_array_add(argv, (char *)"--getopenfilename");
+			if (suggest_dir && *suggest_dir) {
+				path = g_strdup(suggest_dir);
+				g_ptr_array_add(argv, path);
+			}
+			g_ptr_array_add(argv, (char *)"--multiple");
+			g_ptr_array_add(argv, (char *)"--separate-output");
+			g_ptr_array_add(argv, (char *)"--title");
+			g_ptr_array_add(argv, (char *)title);
+			g_ptr_array_add(argv, NULL);
+
+			if (used_native)
+				*used_native = TRUE;
+			result = sdl_spawn_capture((char **) argv->pdata);
+			paths = sdl_split_output_lines(result);
+
+			g_free(result);
+			g_ptr_array_free(argv, TRUE);
+			g_free(path);
+			g_free(prog);
+			return paths;
+		}
+	}
+#endif
+
+	{
+		char *single = sdl_native_file_dialog(title, suggest_dir,
+		                                      NULL, FALSE,
+		                                      used_native);
+		char **paths;
+
+		if (!single)
+			return NULL;
+
+		paths = g_new0(char *, 2);
+		paths[0] = single;
+		paths[1] = NULL;
+		return paths;
+	}
+}
+
+static char *sdl_native_folder_dialog(const char *title,
+                                      const char *suggest_dir,
+                                      gboolean *used_native)
+{
+	if (used_native)
+		*used_native = FALSE;
+
+#ifdef __APPLE__
+	{
+		char *escaped_title = sdl_applescript_escape(title);
+		char *escaped_dir = sdl_applescript_escape(suggest_dir);
+		GString *cmd = g_string_new(NULL);
+		char *script;
+		char *argv[4];
+		char *result;
+
+		g_string_append_printf(cmd,
+		                       "choose folder with prompt \"%s\"",
+		                       escaped_title);
+		if (escaped_dir && *escaped_dir) {
+			g_string_append_printf(cmd,
+			                       " default location POSIX file \"%s\"",
+			                       escaped_dir);
+		}
+
+		script = g_strdup_printf("POSIX path of (%s)", cmd->str);
+
+		argv[0] = (char *)"osascript";
+		argv[1] = (char *)"-e";
+		argv[2] = script;
+		argv[3] = NULL;
+
+		if (used_native)
+			*used_native = TRUE;
+		result = sdl_spawn_capture(argv);
+
+		g_string_free(cmd, TRUE);
+		g_free(script);
+		g_free(escaped_title);
+		g_free(escaped_dir);
+		return result;
+	}
+#elif defined(__linux__)
+	{
+		char *prog = g_find_program_in_path("zenity");
+		char *result = NULL;
+		char *filename = NULL;
+
+		if (prog) {
+			GPtrArray *argv = g_ptr_array_new();
+
+			g_ptr_array_add(argv, prog);
+			g_ptr_array_add(argv, (char *)"--file-selection");
+			g_ptr_array_add(argv, (char *)"--directory");
+			g_ptr_array_add(argv, (char *)"--title");
+			g_ptr_array_add(argv, (char *)title);
+			if (suggest_dir && *suggest_dir) {
+				filename = g_strconcat(suggest_dir,
+				                       G_DIR_SEPARATOR_S,
+				                       NULL);
+				g_ptr_array_add(argv, (char *)"--filename");
+				g_ptr_array_add(argv, filename);
+			}
+			g_ptr_array_add(argv, NULL);
+
+			if (used_native)
+				*used_native = TRUE;
+			result = sdl_spawn_capture((char **) argv->pdata);
+
+			g_ptr_array_free(argv, TRUE);
+			g_free(filename);
+			g_free(prog);
+			return result;
+		}
+
+		prog = g_find_program_in_path("kdialog");
+		if (prog) {
+			char *argv[6];
+			char *path = NULL;
+			int i = 0;
+
+			argv[i++] = prog;
+			argv[i++] = (char *)"--getexistingdirectory";
+			if (suggest_dir && *suggest_dir) {
+				path = g_strdup(suggest_dir);
+				argv[i++] = path;
+			}
+			argv[i++] = (char *)"--title";
+			argv[i++] = (char *)title;
+			argv[i++] = NULL;
+
+			if (used_native)
+				*used_native = TRUE;
+			result = sdl_spawn_capture(argv);
+
+			g_free(path);
+			g_free(prog);
+			return result;
+		}
+	}
+#endif
+
+	return NULL;
+}
+
 static int sdl_text_width(const char *text, int scale)
 {
 	return (int) strlen(text) * 8 * scale;
@@ -1266,10 +1603,8 @@ static void sdl_free_skin(TilemSdlUi *ui)
 		SDL_DestroyTexture(ui->skin_texture);
 	ui->skin_texture = NULL;
 
-	if (ui->skin) {
-		skin_unload(ui->skin);
-		g_free(ui->skin);
-	}
+	if (ui->skin)
+		tilem_sdl_skin_free(ui->skin);
 	ui->skin = NULL;
 
 	g_free(ui->skin_file_name);
@@ -1281,17 +1616,19 @@ static gboolean sdl_load_skin(TilemSdlUi *ui, const char *filename,
 {
 	sdl_free_skin(ui);
 
-	ui->skin = g_new0(SKIN_INFOS, 1);
-	if (skin_load(ui->skin, filename, err)) {
-		skin_unload(ui->skin);
-		g_free(ui->skin);
-		ui->skin = NULL;
+	if (!ui->image_ready) {
+		g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+		            "SDL_image is not available");
 		return FALSE;
 	}
 
+	ui->skin = tilem_sdl_skin_load(filename, err);
+	if (!ui->skin)
+		return FALSE;
+
 	if (ui->renderer) {
-		ui->skin_texture = tilem_sdl_texture_from_pixbuf(ui->renderer,
-		                                                 ui->skin->raw);
+		ui->skin_texture = SDL_CreateTextureFromSurface(
+			ui->renderer, ui->skin->surface);
 		if (!ui->skin_texture) {
 			g_set_error(err, G_FILE_ERROR, G_FILE_ERROR_FAILED,
 			            "Unable to create SDL texture for %s", filename);
@@ -2418,6 +2755,1409 @@ static void sdl_render_preferences(TilemSdlUi *ui)
 	g_free(skin_value);
 }
 
+static int sdl_string_to_slot(const char *str)
+{
+	if (!str)
+		return TI81_SLOT_AUTO;
+
+	if (!g_ascii_strncasecmp(str, "prgm", 4))
+		str += 4;
+	else if (!g_ascii_strncasecmp(str, "ti81_", 5))
+		str += 5;
+	else
+		return TI81_SLOT_AUTO;
+
+	if (g_ascii_isdigit(str[0]) && !g_ascii_isalnum(str[1]))
+		return TI81_SLOT_0 + str[0] - '0';
+	if (g_ascii_isalpha(str[0]) && !g_ascii_isalnum(str[1]))
+		return TI81_SLOT_A + g_ascii_toupper(str[0]) - 'A';
+	if (str[0] == '@'
+	    || !g_ascii_strncasecmp(str, "theta", 5)
+	    || !strncmp(str, "\316\270", 2)
+	    || !strncmp(str, "\316\230", 2))
+		return TI81_SLOT_THETA;
+
+	return TI81_SLOT_AUTO;
+}
+
+static int sdl_guess_slot(const char *filename)
+{
+	char *base;
+	int slot;
+
+	base = g_filename_display_basename(filename);
+	slot = sdl_string_to_slot(base);
+	g_free(base);
+	return slot;
+}
+
+static int sdl_display_index_to_slot(int i)
+{
+	if (i < 9)
+		return i + 1;
+	if (i == 9)
+		return 0;
+	return i;
+}
+
+static int sdl_slot_order[TI81_SLOT_MAX + 1];
+static gboolean sdl_slot_order_ready = FALSE;
+
+static void sdl_slot_init_order(void)
+{
+	int i;
+
+	if (sdl_slot_order_ready)
+		return;
+
+	for (i = 0; i <= TI81_SLOT_MAX; i++)
+		sdl_slot_order[i] = sdl_display_index_to_slot(i);
+	sdl_slot_order_ready = TRUE;
+}
+
+static int sdl_slot_next(int slot, int dir)
+{
+	int i;
+	int n = TI81_SLOT_MAX + 1;
+
+	sdl_slot_init_order();
+	for (i = 0; i < n; i++) {
+		if (sdl_slot_order[i] == slot)
+			break;
+	}
+	if (i == n)
+		return slot;
+
+	i = (i + dir + n) % n;
+	return sdl_slot_order[i];
+}
+
+static int sdl_slot_from_key(SDL_Keycode sym)
+{
+	if (sym >= SDLK_0 && sym <= SDLK_9)
+		return TI81_SLOT_0 + (sym - SDLK_0);
+	if (sym >= SDLK_a && sym <= SDLK_z)
+		return TI81_SLOT_A + (sym - SDLK_a);
+	if (sym == SDLK_AT)
+		return TI81_SLOT_THETA;
+	return TI81_SLOT_AUTO;
+}
+
+static char *sdl_slot_label(const TI81ProgInfo *info, int slot)
+{
+	char *slotstr;
+	char *namestr = NULL;
+	char *label;
+
+	slotstr = ti81_program_slot_to_string(slot);
+	if (!slotstr)
+		return g_strdup("");
+
+	if (info && info->size != 0)
+		namestr = ti81_program_name_to_string(info->name);
+
+	if (namestr && namestr[0])
+		label = g_strdup_printf("%s (in use: %s)", slotstr, namestr);
+	else if (info && info->size != 0)
+		label = g_strdup_printf("%s (in use)", slotstr);
+	else
+		label = g_strdup(slotstr);
+
+	g_free(slotstr);
+	g_free(namestr);
+	return label;
+}
+
+static void sdl_send_files(TilemSdlUi *ui, char **filenames, int *slots)
+{
+	int i;
+
+	if (!ui || !ui->emu || !ui->emu->calc || !filenames)
+		return;
+
+	for (i = 0; filenames[i]; i++) {
+		tilem_link_send_file(ui->emu, filenames[i],
+		                     slots ? slots[i] : -1,
+		                     (i == 0),
+		                     (filenames[i + 1] == NULL));
+		if (ui->emu->isMacroRecording)
+			tilem_macro_add_action(ui->emu->macro, 1, filenames[i]);
+	}
+}
+
+static void sdl_slot_dialog_clear(TilemSdlUi *ui)
+{
+	if (!ui)
+		return;
+
+	if (ui->slot_dialog.filenames)
+		g_strfreev(ui->slot_dialog.filenames);
+	g_free(ui->slot_dialog.slots);
+
+	ui->slot_dialog.filenames = NULL;
+	ui->slot_dialog.slots = NULL;
+	ui->slot_dialog.nfiles = 0;
+	ui->slot_dialog.selected = 0;
+	ui->slot_dialog.top = 0;
+	ui->slot_dialog.visible = FALSE;
+}
+
+static void sdl_slot_dialog_assign_defaults(TilemSdlSlotDialog *dlg)
+{
+	int used[TI81_SLOT_MAX + 1];
+	int i, j, slot;
+
+	memset(used, 0, sizeof(used));
+	for (i = 0; i <= TI81_SLOT_MAX; i++) {
+		if (dlg->info[i].size != 0)
+			used[i] = 1;
+	}
+
+	for (i = 0; i < dlg->nfiles; i++) {
+		slot = sdl_guess_slot(dlg->filenames[i]);
+		if (dlg->slots[i] < 0)
+			dlg->slots[i] = slot;
+		if (slot >= 0)
+			used[slot] = 1;
+	}
+
+	for (i = 0; i < dlg->nfiles; i++) {
+		if (dlg->slots[i] < 0) {
+			for (j = 0; j <= TI81_SLOT_MAX; j++) {
+				slot = sdl_display_index_to_slot(j);
+				if (!used[slot]) {
+					dlg->slots[i] = slot;
+					used[slot] = 1;
+					break;
+				}
+			}
+		}
+		if (dlg->slots[i] < 0)
+			dlg->slots[i] = TI81_SLOT_1;
+	}
+}
+
+static void sdl_slot_dialog_layout(TilemSdlUi *ui,
+                                   TilemSdlSlotLayout *layout)
+{
+	int padding = SDL_MENU_PADDING * 2;
+	int row_h = sdl_menu_item_height(ui);
+	int title_h = row_h;
+	int button_h = row_h + 8;
+	int button_w = sdl_menu_text_width(ui, "Cancel") + 20;
+	int list_rows = ui->slot_dialog.nfiles;
+	int list_h;
+	int panel_w;
+	int panel_h;
+	int max_h;
+	int buttons_y;
+
+	if (list_rows < 1)
+		list_rows = 1;
+	if (list_rows > 10)
+		list_rows = 10;
+
+	list_h = (list_rows + 1) * row_h;
+	panel_w = ui->window_width - padding * 2;
+	if (panel_w > 640)
+		panel_w = 640;
+	panel_h = list_h + title_h + button_h + padding * 4;
+	max_h = ui->window_height - padding * 2;
+	if (panel_h > max_h)
+		panel_h = max_h;
+
+	layout->padding = padding;
+	layout->row_h = row_h;
+	layout->text_h = sdl_pref_text_height(ui);
+	layout->panel.w = panel_w;
+	layout->panel.h = panel_h;
+	layout->panel.x = (ui->window_width - panel_w) / 2;
+	layout->panel.y = (ui->window_height - panel_h) / 2;
+
+	layout->list_rect.x = layout->panel.x + padding;
+	layout->list_rect.y = layout->panel.y + padding + title_h + padding / 2;
+	layout->list_rect.w = panel_w - padding * 2;
+	layout->list_rect.h = panel_h - (title_h + button_h + padding * 3);
+
+	buttons_y = layout->panel.y + panel_h - padding - button_h;
+	layout->send_rect = (SDL_Rect) {
+		layout->panel.x + panel_w - padding - button_w * 2 - 10,
+		buttons_y, button_w, button_h
+	};
+	layout->cancel_rect = (SDL_Rect) {
+		layout->panel.x + panel_w - padding - button_w,
+		buttons_y, button_w, button_h
+	};
+}
+
+static int sdl_slot_dialog_visible_rows(const TilemSdlSlotLayout *layout)
+{
+	int rows = layout->list_rect.h / layout->row_h - 1;
+	if (rows < 1)
+		rows = 1;
+	return rows;
+}
+
+static void sdl_slot_dialog_commit(TilemSdlUi *ui)
+{
+	if (!ui || !ui->slot_dialog.visible)
+		return;
+
+	sdl_send_files(ui, ui->slot_dialog.filenames, ui->slot_dialog.slots);
+	sdl_slot_dialog_clear(ui);
+}
+
+static gboolean sdl_slot_dialog_handle_event(TilemSdlUi *ui,
+                                             const SDL_Event *event)
+{
+	TilemSdlSlotLayout layout;
+	int rows;
+
+	if (!ui || !ui->slot_dialog.visible || !event)
+		return FALSE;
+
+	sdl_slot_dialog_layout(ui, &layout);
+	rows = sdl_slot_dialog_visible_rows(&layout);
+
+	switch (event->type) {
+	case SDL_MOUSEBUTTONDOWN:
+		if (event->button.button != SDL_BUTTON_LEFT)
+			return TRUE;
+		if (!sdl_point_in_rect(event->button.x,
+		                       event->button.y,
+		                       &layout.panel)) {
+			sdl_slot_dialog_clear(ui);
+			return TRUE;
+		}
+		if (sdl_point_in_rect(event->button.x,
+		                      event->button.y,
+		                      &layout.send_rect)) {
+			sdl_slot_dialog_commit(ui);
+			return TRUE;
+		}
+		if (sdl_point_in_rect(event->button.x,
+		                      event->button.y,
+		                      &layout.cancel_rect)) {
+			sdl_slot_dialog_clear(ui);
+			return TRUE;
+		}
+		if (sdl_point_in_rect(event->button.x,
+		                      event->button.y,
+		                      &layout.list_rect)) {
+			int rel_y = event->button.y - layout.list_rect.y;
+			int idx = rel_y / layout.row_h - 1;
+			int row = ui->slot_dialog.top + idx;
+
+			if (idx >= 0 && row >= 0
+			    && row < ui->slot_dialog.nfiles) {
+				ui->slot_dialog.selected = row;
+				if (event->button.clicks >= 2)
+					sdl_slot_dialog_commit(ui);
+			}
+		}
+		return TRUE;
+	case SDL_MOUSEWHEEL:
+		if (event->wheel.y > 0) {
+			ui->slot_dialog.top = MAX(0,
+			                          ui->slot_dialog.top - 1);
+		} else if (event->wheel.y < 0) {
+			ui->slot_dialog.top = MIN(
+				MAX(0, ui->slot_dialog.nfiles - rows),
+				ui->slot_dialog.top + 1);
+		}
+		return TRUE;
+	case SDL_KEYDOWN: {
+		SDL_Keycode sym = event->key.keysym.sym;
+		int slot;
+
+		if (sym >= 'A' && sym <= 'Z')
+			sym = sym - 'A' + 'a';
+
+		switch (sym) {
+		case SDLK_ESCAPE:
+			sdl_slot_dialog_clear(ui);
+			return TRUE;
+		case SDLK_RETURN:
+		case SDLK_KP_ENTER:
+			sdl_slot_dialog_commit(ui);
+			return TRUE;
+		case SDLK_UP:
+			if (ui->slot_dialog.selected > 0)
+				ui->slot_dialog.selected--;
+			if (ui->slot_dialog.selected < ui->slot_dialog.top)
+				ui->slot_dialog.top = ui->slot_dialog.selected;
+			return TRUE;
+		case SDLK_DOWN:
+			if (ui->slot_dialog.selected
+			    < ui->slot_dialog.nfiles - 1)
+				ui->slot_dialog.selected++;
+			if (ui->slot_dialog.selected
+			    >= ui->slot_dialog.top + rows) {
+				ui->slot_dialog.top =
+					ui->slot_dialog.selected - rows + 1;
+			}
+			return TRUE;
+		case SDLK_LEFT:
+			ui->slot_dialog.slots[ui->slot_dialog.selected] =
+				sdl_slot_next(
+					ui->slot_dialog.slots[
+						ui->slot_dialog.selected],
+					-1);
+			return TRUE;
+		case SDLK_RIGHT:
+			ui->slot_dialog.slots[ui->slot_dialog.selected] =
+				sdl_slot_next(
+					ui->slot_dialog.slots[
+						ui->slot_dialog.selected],
+					1);
+			return TRUE;
+		default:
+			slot = sdl_slot_from_key(sym);
+			if (slot >= 0) {
+				ui->slot_dialog.slots[
+					ui->slot_dialog.selected] = slot;
+				return TRUE;
+			}
+		}
+		return TRUE;
+	}
+	default:
+		break;
+	}
+
+	return FALSE;
+}
+
+static void sdl_render_slot_dialog(TilemSdlUi *ui)
+{
+	TilemSdlSlotLayout layout;
+	SDL_Color overlay = { 0, 0, 0, 150 };
+	SDL_Color panel = { 45, 45, 45, 240 };
+	SDL_Color border = { 90, 90, 90, 255 };
+	SDL_Color text = { 230, 230, 230, 255 };
+	SDL_Color dim = { 160, 160, 160, 255 };
+	SDL_Color highlight = { 70, 120, 180, 120 };
+	SDL_Color button_fill = { 70, 70, 70, 255 };
+	int rows;
+	int i;
+	int start_y;
+	int header_y;
+	int col_file_x;
+	int col_slot_x;
+	int slot_w;
+
+	if (!ui || !ui->slot_dialog.visible)
+		return;
+
+	sdl_slot_dialog_layout(ui, &layout);
+	rows = sdl_slot_dialog_visible_rows(&layout);
+
+	SDL_SetRenderDrawBlendMode(ui->renderer, SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(ui->renderer, overlay.r, overlay.g,
+	                       overlay.b, overlay.a);
+	SDL_RenderFillRect(ui->renderer, NULL);
+
+	SDL_SetRenderDrawColor(ui->renderer, panel.r, panel.g,
+	                       panel.b, panel.a);
+	SDL_RenderFillRect(ui->renderer, &layout.panel);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &layout.panel);
+
+	sdl_draw_text_menu(ui,
+	                   layout.panel.x + layout.padding,
+	                   layout.panel.y + layout.padding,
+	                   "Select Program Slots",
+	                   text);
+	sdl_draw_text_menu(ui,
+	                   layout.panel.x + layout.padding,
+	                   layout.panel.y + layout.padding
+	                       + layout.text_h + 4,
+	                   "Choose a slot for each program.",
+	                   dim);
+
+	header_y = layout.list_rect.y;
+	start_y = header_y + layout.row_h;
+	slot_w = sdl_menu_text_width(ui, "PrgmM (in use)") + 20;
+	col_file_x = layout.list_rect.x + 6;
+	col_slot_x = layout.list_rect.x + layout.list_rect.w - slot_w;
+
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &layout.list_rect);
+
+	sdl_draw_text_menu(ui, col_file_x,
+	                   header_y + (layout.row_h - layout.text_h) / 2,
+	                   "File", dim);
+	sdl_draw_text_menu(ui, col_slot_x,
+	                   header_y + (layout.row_h - layout.text_h) / 2,
+	                   "Slot", dim);
+
+	for (i = 0; i < rows; i++) {
+		int row = ui->slot_dialog.top + i;
+		SDL_Rect row_rect;
+		char *base;
+		char *slot_label;
+
+		if (row >= ui->slot_dialog.nfiles)
+			break;
+
+		row_rect.x = layout.list_rect.x + 1;
+		row_rect.y = start_y + i * layout.row_h;
+		row_rect.w = layout.list_rect.w - 2;
+		row_rect.h = layout.row_h;
+
+		if (row == ui->slot_dialog.selected) {
+			SDL_SetRenderDrawColor(ui->renderer, highlight.r,
+			                       highlight.g, highlight.b,
+			                       highlight.a);
+			SDL_RenderFillRect(ui->renderer, &row_rect);
+		}
+
+		base = g_filename_display_basename(
+			ui->slot_dialog.filenames[row]);
+		slot_label = sdl_slot_label(&ui->slot_dialog.info[
+			ui->slot_dialog.slots[row]],
+			ui->slot_dialog.slots[row]);
+
+		sdl_draw_text_menu(ui,
+		                   col_file_x,
+		                   row_rect.y
+		                       + (layout.row_h - layout.text_h) / 2,
+		                   base, text);
+		sdl_draw_text_menu(ui,
+		                   col_slot_x,
+		                   row_rect.y
+		                       + (layout.row_h - layout.text_h) / 2,
+		                   slot_label, text);
+
+		g_free(base);
+		g_free(slot_label);
+	}
+
+	SDL_SetRenderDrawColor(ui->renderer, button_fill.r, button_fill.g,
+	                       button_fill.b, 255);
+	SDL_RenderFillRect(ui->renderer, &layout.send_rect);
+	SDL_RenderFillRect(ui->renderer, &layout.cancel_rect);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &layout.send_rect);
+	SDL_RenderDrawRect(ui->renderer, &layout.cancel_rect);
+
+	sdl_draw_text_menu(ui,
+	                   layout.send_rect.x + 12,
+	                   layout.send_rect.y
+	                       + (layout.send_rect.h - layout.text_h) / 2,
+	                   "Send",
+	                   text);
+	sdl_draw_text_menu(ui,
+	                   layout.cancel_rect.x + 12,
+	                   layout.cancel_rect.y
+	                       + (layout.cancel_rect.h - layout.text_h) / 2,
+	                   "Cancel",
+	                   text);
+
+	SDL_SetRenderDrawBlendMode(ui->renderer, SDL_BLENDMODE_NONE);
+}
+
+static void sdl_receive_dialog_clear(TilemSdlUi *ui)
+{
+	TilemSdlReceiveDialog *dlg;
+	int i;
+
+	if (!ui)
+		return;
+
+	dlg = &ui->receive_dialog;
+	if (dlg->entries) {
+		for (i = 0; i < (int) dlg->entries->len; i++) {
+			TilemVarEntry *tve = g_ptr_array_index(dlg->entries, i);
+			tilem_var_entry_free(tve);
+		}
+		g_ptr_array_free(dlg->entries, TRUE);
+	}
+	if (dlg->selected_flags)
+		g_array_free(dlg->selected_flags, TRUE);
+
+	dlg->entries = NULL;
+	dlg->selected_flags = NULL;
+	dlg->selected = 0;
+	dlg->top = 0;
+	dlg->hover = -1;
+	dlg->visible = FALSE;
+	dlg->refresh_pending = FALSE;
+}
+
+static void sdl_receive_dialog_set_entries(TilemSdlUi *ui, GSList *list)
+{
+	TilemSdlReceiveDialog *dlg;
+	GSList *l;
+
+	dlg = &ui->receive_dialog;
+	sdl_receive_dialog_clear(ui);
+
+	dlg->entries = g_ptr_array_new();
+	for (l = list; l; l = l->next)
+		g_ptr_array_add(dlg->entries, l->data);
+	g_slist_free(list);
+
+	dlg->selected_flags = g_array_sized_new(FALSE, TRUE,
+	                                        sizeof(gboolean),
+	                                        dlg->entries->len);
+	g_array_set_size(dlg->selected_flags, dlg->entries->len);
+	memset(dlg->selected_flags->data, 0,
+	       dlg->entries->len * sizeof(gboolean));
+
+	dlg->selected = 0;
+	dlg->top = 0;
+	dlg->hover = -1;
+	dlg->is_81 = (ui->emu->calc->hw.model_id == TILEM_CALC_TI81);
+	dlg->use_group = FALSE;
+	if (!dlg->is_81)
+		tilem_config_get("download", "save_as_group/b=1",
+		                 &dlg->use_group, NULL);
+	dlg->visible = TRUE;
+	dlg->refresh_pending = FALSE;
+	ui->menu_visible = FALSE;
+	ui->submenu_visible = FALSE;
+	ui->prefs_visible = FALSE;
+}
+
+static void sdl_receive_dialog_update(G_GNUC_UNUSED TilemCalcEmulator *emu,
+                                      GSList *list,
+                                      const char *error_message,
+                                      gpointer data)
+{
+	TilemSdlUi *ui = data;
+	GSList *l;
+
+	if (!ui)
+		return;
+
+	ui->receive_dialog.refresh_pending = FALSE;
+
+	if (error_message && *error_message) {
+		sdl_show_message(ui, "Receive File", error_message);
+		for (l = list; l; l = l->next)
+			tilem_var_entry_free(l->data);
+		g_slist_free(list);
+		return;
+	}
+
+	if (!list) {
+		sdl_show_message(ui, "Receive File",
+		                 "No variables to receive.");
+		return;
+	}
+
+	sdl_receive_dialog_set_entries(ui, list);
+}
+
+static void sdl_receive_dialog_request(TilemSdlUi *ui)
+{
+	if (!ui || !ui->emu || !ui->emu->calc)
+		return;
+
+	if (ui->receive_dialog.refresh_pending)
+		return;
+
+	ui->receive_dialog.refresh_pending = TRUE;
+	tilem_link_get_dirlist_with_callback(
+		ui->emu, TRUE, sdl_receive_dialog_update, ui);
+}
+
+static void sdl_receive_dialog_layout(TilemSdlUi *ui,
+                                      TilemSdlReceiveLayout *layout)
+{
+	int padding = SDL_MENU_PADDING * 2;
+	int row_h = sdl_menu_item_height(ui);
+	int title_h = row_h;
+	int button_h = row_h + 8;
+	int panel_w = ui->window_width - padding * 2;
+	int panel_h = ui->window_height - padding * 2;
+	int mode_h = ui->receive_dialog.is_81 ? 0 : row_h;
+	int buttons_y;
+
+	if (panel_w > 720)
+		panel_w = 720;
+	if (panel_h > 520)
+		panel_h = 520;
+	if (panel_h < row_h * 6 + padding * 2)
+		panel_h = row_h * 6 + padding * 2;
+
+	layout->padding = padding;
+	layout->row_h = row_h;
+	layout->header_h = row_h;
+	layout->text_h = sdl_pref_text_height(ui);
+	layout->panel.w = panel_w;
+	layout->panel.h = panel_h;
+	layout->panel.x = (ui->window_width - panel_w) / 2;
+	layout->panel.y = (ui->window_height - panel_h) / 2;
+
+	layout->list_rect.x = layout->panel.x + padding;
+	layout->list_rect.y = layout->panel.y + padding + title_h + padding / 2;
+	layout->list_rect.w = panel_w - padding * 2;
+	layout->list_rect.h = panel_h - (title_h + button_h + mode_h
+	                                 + padding * 3);
+
+	buttons_y = layout->panel.y + panel_h - padding - button_h;
+	layout->refresh_rect = (SDL_Rect) {
+		layout->panel.x + padding,
+		buttons_y,
+		sdl_menu_text_width(ui, "Refresh") + 24,
+		button_h
+	};
+	layout->cancel_rect = (SDL_Rect) {
+		layout->panel.x + panel_w - padding
+			- sdl_menu_text_width(ui, "Cancel") - 24,
+		buttons_y,
+		sdl_menu_text_width(ui, "Cancel") + 24,
+		button_h
+	};
+	layout->save_rect = (SDL_Rect) {
+		layout->cancel_rect.x
+			- sdl_menu_text_width(ui, "Save") - 34,
+		buttons_y,
+		sdl_menu_text_width(ui, "Save") + 24,
+		button_h
+	};
+
+	layout->mode_label_rect = (SDL_Rect) {
+		layout->panel.x + padding,
+		buttons_y - mode_h - 6,
+		sdl_menu_text_width(ui, "Save as:"),
+		row_h
+	};
+	layout->mode_sep_rect = (SDL_Rect) {
+		layout->mode_label_rect.x + layout->mode_label_rect.w + 10,
+		layout->mode_label_rect.y,
+		sdl_menu_text_width(ui, "Separate files") + 24,
+		row_h
+	};
+	layout->mode_group_rect = (SDL_Rect) {
+		layout->mode_sep_rect.x + layout->mode_sep_rect.w + 10,
+		layout->mode_sep_rect.y,
+		sdl_menu_text_width(ui, "Group file") + 24,
+		row_h
+	};
+}
+
+static int sdl_receive_dialog_visible_rows(const TilemSdlReceiveLayout *layout)
+{
+	int rows = layout->list_rect.h / layout->row_h - 1;
+	if (rows < 1)
+		rows = 1;
+	return rows;
+}
+
+static int sdl_receive_dialog_hit_row(const TilemSdlReceiveLayout *layout,
+                                      int x, int y)
+{
+	int rel_y;
+	int idx;
+
+	if (!sdl_point_in_rect(x, y, &layout->list_rect))
+		return -1;
+
+	rel_y = y - layout->list_rect.y;
+	idx = rel_y / layout->row_h - 1;
+	return idx;
+}
+
+static gboolean sdl_receive_dialog_is_selected(TilemSdlReceiveDialog *dlg,
+                                               int idx)
+{
+	if (!dlg->selected_flags)
+		return FALSE;
+	if (idx < 0 || idx >= (int) dlg->selected_flags->len)
+		return FALSE;
+	return g_array_index(dlg->selected_flags, gboolean, idx);
+}
+
+static void sdl_receive_dialog_set_selected(TilemSdlReceiveDialog *dlg,
+                                            int idx, gboolean selected)
+{
+	if (!dlg->selected_flags)
+		return;
+	if (idx < 0 || idx >= (int) dlg->selected_flags->len)
+		return;
+	g_array_index(dlg->selected_flags, gboolean, idx) = selected;
+}
+
+static GSList *sdl_receive_dialog_selected_entries(TilemSdlReceiveDialog *dlg)
+{
+	GSList *list = NULL;
+	int i;
+
+	if (!dlg->entries || !dlg->selected_flags)
+		return NULL;
+
+	for (i = 0; i < (int) dlg->entries->len; i++) {
+		if (g_array_index(dlg->selected_flags, gboolean, i))
+			list = g_slist_prepend(list,
+			                       g_ptr_array_index(dlg->entries,
+			                                         i));
+	}
+
+	return g_slist_reverse(list);
+}
+
+static gboolean sdl_prompt_overwrite(TilemSdlUi *ui, const char *dirname,
+                                     char **filenames)
+{
+	GString *conflicts = NULL;
+	SDL_MessageBoxButtonData buttons[] = {
+		{ SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Replace" },
+		{ SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Cancel" }
+	};
+	SDL_MessageBoxData msg;
+	int i;
+	int response = 0;
+	char *dname;
+	char *message;
+
+	if (!filenames || !dirname)
+		return TRUE;
+
+	for (i = 0; filenames[i]; i++) {
+		if (g_file_test(filenames[i], G_FILE_TEST_EXISTS)) {
+			char *base = g_filename_display_basename(
+				filenames[i]);
+			if (!conflicts)
+				conflicts = g_string_new(NULL);
+			else
+				g_string_append_c(conflicts, '\n');
+			g_string_append(conflicts, base);
+			g_free(base);
+		}
+	}
+
+	if (!conflicts)
+		return TRUE;
+
+	dname = g_filename_display_basename(dirname);
+	message = g_strdup_printf("The following files already exist in \"%s\":\n%s",
+	                          dname, conflicts->str);
+
+	memset(&msg, 0, sizeof(msg));
+	msg.flags = SDL_MESSAGEBOX_WARNING;
+	msg.window = ui ? ui->window : NULL;
+	msg.title = "Replace existing files?";
+	msg.message = message;
+	msg.numbuttons = 2;
+	msg.buttons = buttons;
+
+	SDL_ShowMessageBox(&msg, &response);
+
+	g_free(message);
+	g_free(dname);
+	g_string_free(conflicts, TRUE);
+	return response == 1;
+}
+
+static char *sdl_pick_receive_save_file(TilemSdlUi *ui,
+                                        const char *title,
+                                        const char *suggest_name)
+{
+	char *dir = NULL;
+	char *filename;
+	gboolean used_native = FALSE;
+
+	tilem_config_get("download", "receivefile_recentdir/f", &dir, NULL);
+	if (!dir)
+		dir = g_get_current_dir();
+
+	filename = sdl_native_file_dialog(title, dir, suggest_name,
+	                                  TRUE, &used_native);
+	g_free(dir);
+
+	if (!filename && !used_native) {
+		sdl_show_message(ui, "Receive File",
+		                 "No native file picker available.");
+	}
+
+	if (filename) {
+		dir = g_path_get_dirname(filename);
+		tilem_config_set("download", "receivefile_recentdir/f", dir,
+		                 NULL);
+		g_free(dir);
+	}
+
+	return filename;
+}
+
+static char *sdl_pick_receive_dir(TilemSdlUi *ui)
+{
+	char *dir = NULL;
+	char *selected;
+	gboolean used_native = FALSE;
+
+	tilem_config_get("download", "receivefile_recentdir/f", &dir, NULL);
+	if (!dir)
+		dir = g_get_current_dir();
+
+	selected = sdl_native_folder_dialog("Save Files to Directory",
+	                                    dir, &used_native);
+	g_free(dir);
+
+	if (!selected && !used_native) {
+		sdl_show_message(ui, "Receive File",
+		                 "No native folder picker available.");
+	}
+
+	if (selected) {
+		tilem_config_set("download", "receivefile_recentdir/f",
+		                 selected, NULL);
+	}
+
+	return selected;
+}
+
+static void sdl_receive_free_entries(GSList *entries)
+{
+	GSList *l;
+
+	for (l = entries; l; l = l->next)
+		tilem_var_entry_free(l->data);
+	g_slist_free(entries);
+}
+
+static gboolean sdl_receive_save_single(TilemSdlUi *ui, TilemVarEntry *tve)
+{
+	char *default_filename;
+	char *default_filename_f;
+	char *filename;
+	TilemVarEntry *copy;
+	gboolean will_free;
+
+	default_filename = get_default_filename(tve);
+	default_filename_f = utf8_to_filename(default_filename);
+	g_free(default_filename);
+
+	filename = sdl_pick_receive_save_file(ui, "Save File",
+	                                      default_filename_f);
+	g_free(default_filename_f);
+
+	if (!filename)
+		return FALSE;
+
+	copy = tilem_var_entry_copy(tve);
+	will_free = (copy->ve && copy->ve->data);
+	tilem_link_receive_file(ui->emu, copy, filename);
+	if (!will_free)
+		tilem_var_entry_free(copy);
+
+	g_free(filename);
+	return TRUE;
+}
+
+static gboolean sdl_receive_save_group(TilemSdlUi *ui, GSList *rows)
+{
+	GSList *l;
+	GSList *entries = NULL;
+	gboolean can_group = TRUE;
+	char *fext;
+	char *default_filename;
+	char *filename;
+	TilemVarEntry *first;
+	gboolean will_free;
+	CalcModel tfmodel;
+
+	for (l = rows; l; l = l->next) {
+		TilemVarEntry *tve = l->data;
+		if (!tve->can_group)
+			can_group = FALSE;
+	}
+
+	tfmodel = get_calc_model(ui->emu->calc);
+	fext = g_ascii_strdown(tifiles_fext_of_group(tfmodel), -1);
+	default_filename = g_strdup_printf("untitled.%s",
+	                                   can_group ? fext : "tig");
+	g_free(fext);
+
+	filename = sdl_pick_receive_save_file(ui, "Save File",
+	                                      default_filename);
+	g_free(default_filename);
+	if (!filename)
+		return FALSE;
+
+	for (l = rows; l; l = l->next)
+		entries = g_slist_prepend(entries,
+		                          tilem_var_entry_copy(l->data));
+	entries = g_slist_reverse(entries);
+
+	first = entries->data;
+	will_free = (first->ve && first->ve->data);
+	tilem_link_receive_group(ui->emu, entries, filename);
+	if (!will_free)
+		sdl_receive_free_entries(entries);
+
+	tilem_config_set("download", "save_as_group/b",
+	                 TRUE, NULL);
+	g_free(filename);
+	return TRUE;
+}
+
+static gboolean sdl_receive_save_multiple(TilemSdlUi *ui, GSList *rows,
+                                          gboolean use_group)
+{
+	GSList *l;
+	char *dir;
+	char **names;
+	int n;
+	int i;
+
+	if (use_group && !ui->receive_dialog.is_81)
+		return sdl_receive_save_group(ui, rows);
+
+	dir = sdl_pick_receive_dir(ui);
+	if (!dir)
+		return FALSE;
+
+	n = g_slist_length(rows);
+	names = g_new(char *, n + 1);
+
+	for (l = rows, i = 0; l; l = l->next, i++) {
+		TilemVarEntry *tve = l->data;
+		char *default_filename = get_default_filename(tve);
+		char *default_filename_f = utf8_to_filename(default_filename);
+		g_free(default_filename);
+		names[i] = g_build_filename(dir, default_filename_f, NULL);
+		g_free(default_filename_f);
+	}
+	names[i] = NULL;
+
+	if (!sdl_prompt_overwrite(ui, dir, names)) {
+		for (i = 0; names[i]; i++)
+			g_free(names[i]);
+		g_free(names);
+		g_free(dir);
+		return FALSE;
+	}
+
+	for (l = rows, i = 0; l; l = l->next, i++) {
+		TilemVarEntry *copy = tilem_var_entry_copy(l->data);
+		gboolean will_free = (copy->ve && copy->ve->data);
+		tilem_link_receive_file(ui->emu, copy, names[i]);
+		if (!will_free)
+			tilem_var_entry_free(copy);
+	}
+
+	tilem_config_set("download", "save_as_group/b",
+	                 use_group, NULL);
+
+	for (i = 0; names[i]; i++)
+		g_free(names[i]);
+	g_free(names);
+	g_free(dir);
+	return TRUE;
+}
+
+static void sdl_receive_dialog_save(TilemSdlUi *ui)
+{
+	TilemSdlReceiveDialog *dlg = &ui->receive_dialog;
+	GSList *rows;
+	int count;
+
+	rows = sdl_receive_dialog_selected_entries(dlg);
+	count = g_slist_length(rows);
+	if (!rows || count == 0) {
+		sdl_show_message(ui, "Receive File",
+		                 "No variables selected.");
+		g_slist_free(rows);
+		return;
+	}
+
+	if (count == 1) {
+		sdl_receive_save_single(ui, rows->data);
+	} else {
+		sdl_receive_save_multiple(ui, rows, dlg->use_group);
+	}
+
+	g_slist_free(rows);
+}
+
+static gboolean sdl_receive_dialog_handle_event(TilemSdlUi *ui,
+                                                const SDL_Event *event)
+{
+	TilemSdlReceiveLayout layout;
+	TilemSdlReceiveDialog *dlg;
+	int rows;
+
+	if (!ui || !ui->receive_dialog.visible || !event)
+		return FALSE;
+
+	dlg = &ui->receive_dialog;
+	sdl_receive_dialog_layout(ui, &layout);
+	rows = sdl_receive_dialog_visible_rows(&layout);
+
+	switch (event->type) {
+	case SDL_MOUSEBUTTONDOWN:
+		if (event->button.button != SDL_BUTTON_LEFT)
+			return TRUE;
+		if (!sdl_point_in_rect(event->button.x,
+		                       event->button.y,
+		                       &layout.panel)) {
+			sdl_receive_dialog_clear(ui);
+			return TRUE;
+		}
+		if (!dlg->is_81
+		    && sdl_point_in_rect(event->button.x,
+		                         event->button.y,
+		                         &layout.mode_sep_rect)) {
+			dlg->use_group = FALSE;
+			return TRUE;
+		}
+		if (!dlg->is_81
+		    && sdl_point_in_rect(event->button.x,
+		                         event->button.y,
+		                         &layout.mode_group_rect)) {
+			dlg->use_group = TRUE;
+			return TRUE;
+		}
+		if (sdl_point_in_rect(event->button.x,
+		                      event->button.y,
+		                      &layout.refresh_rect)) {
+			if (!dlg->is_81)
+				sdl_receive_dialog_request(ui);
+			return TRUE;
+		}
+		if (sdl_point_in_rect(event->button.x,
+		                      event->button.y,
+		                      &layout.save_rect)) {
+			sdl_receive_dialog_save(ui);
+			return TRUE;
+		}
+		if (sdl_point_in_rect(event->button.x,
+		                      event->button.y,
+		                      &layout.cancel_rect)) {
+			sdl_receive_dialog_clear(ui);
+			return TRUE;
+		}
+		if (sdl_point_in_rect(event->button.x,
+		                      event->button.y,
+		                      &layout.list_rect)) {
+			int idx = sdl_receive_dialog_hit_row(
+				&layout, event->button.x,
+				event->button.y);
+			int row = dlg->top + idx;
+
+			if (idx >= 0 && row >= 0
+			    && row < (int) dlg->entries->len) {
+				dlg->selected = row;
+				sdl_receive_dialog_set_selected(
+					dlg, row,
+					!sdl_receive_dialog_is_selected(
+						dlg, row));
+				if (event->button.clicks >= 2)
+					sdl_receive_dialog_save(ui);
+			}
+		}
+		return TRUE;
+	case SDL_MOUSEWHEEL:
+		if (event->wheel.y > 0) {
+			dlg->top = MAX(0, dlg->top - 1);
+		} else if (event->wheel.y < 0) {
+			dlg->top = MIN(
+				MAX(0,
+				    (int) dlg->entries->len - rows),
+				dlg->top + 1);
+		}
+		return TRUE;
+	case SDL_KEYDOWN: {
+		SDL_Keycode sym = event->key.keysym.sym;
+
+		if (sym >= 'A' && sym <= 'Z')
+			sym = sym - 'A' + 'a';
+
+		switch (sym) {
+		case SDLK_ESCAPE:
+			sdl_receive_dialog_clear(ui);
+			return TRUE;
+		case SDLK_RETURN:
+		case SDLK_KP_ENTER:
+			sdl_receive_dialog_save(ui);
+			return TRUE;
+		case SDLK_UP:
+			if (dlg->selected > 0)
+				dlg->selected--;
+			if (dlg->selected < dlg->top)
+				dlg->top = dlg->selected;
+			sdl_receive_dialog_set_selected(dlg,
+			                                dlg->selected,
+			                                TRUE);
+			return TRUE;
+		case SDLK_DOWN:
+			if (dlg->selected < (int) dlg->entries->len - 1)
+				dlg->selected++;
+			if (dlg->selected >= dlg->top + rows)
+				dlg->top = dlg->selected - rows + 1;
+			sdl_receive_dialog_set_selected(dlg,
+			                                dlg->selected,
+			                                TRUE);
+			return TRUE;
+		case SDLK_SPACE:
+			sdl_receive_dialog_set_selected(
+				dlg, dlg->selected,
+				!sdl_receive_dialog_is_selected(
+					dlg, dlg->selected));
+			return TRUE;
+		case SDLK_a:
+			if (event->key.keysym.mod & KMOD_CTRL) {
+				int i;
+				for (i = 0;
+				     i < (int) dlg->entries->len; i++)
+					sdl_receive_dialog_set_selected(
+						dlg, i, TRUE);
+			}
+			return TRUE;
+		default:
+			break;
+		}
+		return TRUE;
+	}
+	default:
+		break;
+	}
+
+	return FALSE;
+}
+
+static void sdl_render_receive_dialog(TilemSdlUi *ui)
+{
+	TilemSdlReceiveLayout layout;
+	TilemSdlReceiveDialog *dlg;
+	SDL_Color overlay = { 0, 0, 0, 150 };
+	SDL_Color panel = { 45, 45, 45, 240 };
+	SDL_Color border = { 90, 90, 90, 255 };
+	SDL_Color text = { 230, 230, 230, 255 };
+	SDL_Color dim = { 160, 160, 160, 255 };
+	SDL_Color highlight = { 70, 120, 180, 120 };
+	SDL_Color button_fill = { 70, 70, 70, 255 };
+	int rows;
+	int i;
+	int header_y;
+	int start_y;
+	int checkbox_size;
+	int col_x;
+	int slot_w = 0;
+	int type_w = 0;
+	int size_w;
+
+	if (!ui || !ui->receive_dialog.visible)
+		return;
+
+	dlg = &ui->receive_dialog;
+	sdl_receive_dialog_layout(ui, &layout);
+	rows = sdl_receive_dialog_visible_rows(&layout);
+	checkbox_size = layout.row_h - 6;
+
+	SDL_SetRenderDrawBlendMode(ui->renderer, SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(ui->renderer, overlay.r, overlay.g,
+	                       overlay.b, overlay.a);
+	SDL_RenderFillRect(ui->renderer, NULL);
+
+	SDL_SetRenderDrawColor(ui->renderer, panel.r, panel.g,
+	                       panel.b, panel.a);
+	SDL_RenderFillRect(ui->renderer, &layout.panel);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &layout.panel);
+
+	sdl_draw_text_menu(ui,
+	                   layout.panel.x + layout.padding,
+	                   layout.panel.y + layout.padding,
+	                   "Receive File",
+	                   text);
+
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &layout.list_rect);
+
+	header_y = layout.list_rect.y;
+	start_y = header_y + layout.row_h;
+
+	col_x = layout.list_rect.x + 6 + checkbox_size + 6;
+	if (dlg->is_81) {
+		slot_w = sdl_menu_text_width(ui, "PrgmM ") + 8;
+	}
+	type_w = sdl_menu_text_width(ui, "MMMMMM ") + 8;
+	size_w = sdl_menu_text_width(ui, "00,000,000") + 8;
+
+	if (dlg->is_81) {
+		sdl_draw_text_menu(ui, col_x,
+		                   header_y
+		                       + (layout.row_h - layout.text_h) / 2,
+		                   "Slot", dim);
+		col_x += slot_w;
+	}
+	sdl_draw_text_menu(ui, col_x,
+	                   header_y
+	                       + (layout.row_h - layout.text_h) / 2,
+	                   "Name", dim);
+	if (!dlg->is_81) {
+		col_x = layout.list_rect.x + layout.list_rect.w - size_w
+			- type_w;
+		sdl_draw_text_menu(ui, col_x,
+		                   header_y
+		                       + (layout.row_h - layout.text_h) / 2,
+		                   "Type", dim);
+	}
+	sdl_draw_text_menu(ui,
+	                   layout.list_rect.x + layout.list_rect.w - size_w,
+	                   header_y
+	                       + (layout.row_h - layout.text_h) / 2,
+	                   "Size", dim);
+
+	for (i = 0; i < rows; i++) {
+		int row = dlg->top + i;
+		SDL_Rect row_rect;
+		SDL_Rect checkbox;
+		TilemVarEntry *tve;
+		char *size_str;
+		int y;
+
+		if (row >= (int) dlg->entries->len)
+			break;
+
+		tve = g_ptr_array_index(dlg->entries, row);
+		y = start_y + i * layout.row_h;
+		row_rect = (SDL_Rect) {
+			layout.list_rect.x + 1, y,
+			layout.list_rect.w - 2, layout.row_h
+		};
+		if (row == dlg->selected) {
+			SDL_SetRenderDrawColor(ui->renderer, highlight.r,
+			                       highlight.g, highlight.b,
+			                       highlight.a);
+			SDL_RenderFillRect(ui->renderer, &row_rect);
+		}
+
+		checkbox = (SDL_Rect) {
+			layout.list_rect.x + 6,
+			y + (layout.row_h - checkbox_size) / 2,
+			checkbox_size, checkbox_size
+		};
+		sdl_draw_checkbox(ui->renderer, checkbox,
+		                  sdl_receive_dialog_is_selected(dlg, row),
+		                  border, panel, text);
+
+		col_x = layout.list_rect.x + 6 + checkbox_size + 6;
+		if (dlg->is_81) {
+			sdl_draw_text_menu(ui, col_x,
+			                   y
+			                       + (layout.row_h
+			                          - layout.text_h) / 2,
+			                   tve->slot_str ? tve->slot_str : "",
+			                   text);
+			col_x += slot_w;
+		}
+
+		sdl_draw_text_menu(ui, col_x,
+		                   y
+		                       + (layout.row_h
+		                          - layout.text_h) / 2,
+		                   tve->name_str ? tve->name_str : "",
+		                   text);
+
+		if (!dlg->is_81) {
+			sdl_draw_text_menu(
+				ui,
+				layout.list_rect.x + layout.list_rect.w
+					- size_w - type_w,
+				y + (layout.row_h - layout.text_h) / 2,
+				tve->type_str ? tve->type_str : "",
+				text);
+		}
+#ifdef G_OS_WIN32
+		size_str = g_strdup_printf("%d", tve->size);
+#else
+		size_str = g_strdup_printf("%'d", tve->size);
+#endif
+		sdl_draw_text_menu(ui,
+		                   layout.list_rect.x
+		                       + layout.list_rect.w - size_w,
+		                   y
+		                       + (layout.row_h
+		                          - layout.text_h) / 2,
+		                   size_str, text);
+		g_free(size_str);
+	}
+
+	if (!dlg->is_81) {
+		sdl_draw_text_menu(ui,
+		                   layout.mode_label_rect.x,
+		                   layout.mode_label_rect.y
+		                       + (layout.row_h - layout.text_h) / 2,
+		                   "Save as:",
+		                   dim);
+		sdl_draw_radio(ui->renderer,
+		               (SDL_Rect) {
+		                   layout.mode_sep_rect.x,
+		                   layout.mode_sep_rect.y
+		                       + (layout.row_h - checkbox_size) / 2,
+		                   checkbox_size, checkbox_size
+		               },
+		               !dlg->use_group,
+		               border, panel, text);
+		sdl_draw_text_menu(ui,
+		                   layout.mode_sep_rect.x
+		                       + checkbox_size + 8,
+		                   layout.mode_sep_rect.y
+		                       + (layout.row_h - layout.text_h) / 2,
+		                   "Separate files",
+		                   text);
+		sdl_draw_radio(ui->renderer,
+		               (SDL_Rect) {
+		                   layout.mode_group_rect.x,
+		                   layout.mode_group_rect.y
+		                       + (layout.row_h - checkbox_size) / 2,
+		                   checkbox_size, checkbox_size
+		               },
+		               dlg->use_group,
+		               border, panel, text);
+		sdl_draw_text_menu(ui,
+		                   layout.mode_group_rect.x
+		                       + checkbox_size + 8,
+		                   layout.mode_group_rect.y
+		                       + (layout.row_h - layout.text_h) / 2,
+		                   "Group file",
+		                   text);
+	}
+
+	SDL_SetRenderDrawColor(ui->renderer, button_fill.r, button_fill.g,
+	                       button_fill.b, 255);
+	SDL_RenderFillRect(ui->renderer, &layout.refresh_rect);
+	SDL_RenderFillRect(ui->renderer, &layout.save_rect);
+	SDL_RenderFillRect(ui->renderer, &layout.cancel_rect);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &layout.refresh_rect);
+	SDL_RenderDrawRect(ui->renderer, &layout.save_rect);
+	SDL_RenderDrawRect(ui->renderer, &layout.cancel_rect);
+
+	sdl_draw_text_menu(ui,
+	                   layout.refresh_rect.x + 12,
+	                   layout.refresh_rect.y
+	                       + (layout.refresh_rect.h - layout.text_h) / 2,
+	                   "Refresh",
+	                   dlg->is_81 ? dim : text);
+	sdl_draw_text_menu(ui,
+	                   layout.save_rect.x + 12,
+	                   layout.save_rect.y
+	                       + (layout.save_rect.h - layout.text_h) / 2,
+	                   "Save",
+	                   text);
+	sdl_draw_text_menu(ui,
+	                   layout.cancel_rect.x + 12,
+	                   layout.cancel_rect.y
+	                       + (layout.cancel_rect.h - layout.text_h) / 2,
+	                   "Cancel",
+	                   text);
+
+	SDL_SetRenderDrawBlendMode(ui->renderer, SDL_BLENDMODE_NONE);
+}
+
 static void sdl_render_lcd(TilemSdlUi *ui)
 {
 	SDL_Color text_color = { 200, 200, 200, 255 };
@@ -2477,11 +4217,13 @@ static void sdl_render(TilemSdlUi *ui)
 	sdl_render_lcd(ui);
 	sdl_render_menu(ui);
 	sdl_render_preferences(ui);
+	sdl_render_slot_dialog(ui);
+	sdl_render_receive_dialog(ui);
 	SDL_RenderPresent(ui->renderer);
 }
 
 /* Find keycode for the key (if any) at the given position. */
-static int scan_click(const SKIN_INFOS* skin, double x, double y)
+static int scan_click(const TilemSdlSkin *skin, double x, double y)
 {
 	guint ix, iy, nearest = 0, i;
 	int dx, dy, d, best_d = G_MAXINT;
@@ -2616,6 +4358,12 @@ static void sdl_update_skin_for_calc(TilemSdlUi *ui)
 	char *skin_path = NULL;
 	GError *err = NULL;
 
+	if (!ui || !ui->emu || (!ui->emu->calc && !ui->skin_override)) {
+		sdl_free_skin(ui);
+		sdl_set_palette(ui);
+		return;
+	}
+
 	if (ui->skin_disabled) {
 		sdl_free_skin(ui);
 		sdl_set_palette(ui);
@@ -2719,10 +4467,10 @@ static char *sdl_pick_state_save_file(TilemSdlUi *ui)
 	return filename;
 }
 
-static char *sdl_pick_send_file(TilemSdlUi *ui)
+static char **sdl_pick_send_files(TilemSdlUi *ui)
 {
 	char *dir = NULL;
-	char *filename;
+	char **filenames;
 	gboolean used_native = FALSE;
 
 	if (!ui->emu->calc)
@@ -2732,55 +4480,22 @@ static char *sdl_pick_send_file(TilemSdlUi *ui)
 	if (!dir)
 		dir = g_get_current_dir();
 
-	filename = sdl_native_file_dialog("Send File", dir, NULL, FALSE,
-	                                  &used_native);
+	filenames = sdl_native_file_dialog_multi("Send File", dir,
+	                                         &used_native);
 	g_free(dir);
 
-	if (!filename && !used_native) {
+	if (!filenames && !used_native) {
 		sdl_show_message(ui, "Send File",
 		                 "No native file picker available.");
 	}
 
-	if (filename) {
-		dir = g_path_get_dirname(filename);
+	if (filenames) {
+		dir = g_path_get_dirname(filenames[0]);
 		tilem_config_set("upload", "sendfile_recentdir/f", dir, NULL);
 		g_free(dir);
 	}
 
-	return filename;
-}
-
-static char *sdl_pick_receive_file(TilemSdlUi *ui)
-{
-	char *dir = NULL;
-	char *filename;
-	gboolean used_native = FALSE;
-
-	if (!ui->emu->calc)
-		return NULL;
-
-	tilem_config_get("download", "receivefile_recentdir/f", &dir, NULL);
-	if (!dir)
-		dir = g_get_current_dir();
-
-	filename = sdl_native_file_dialog("Receive File", dir,
-	                                  "calculator.tig", TRUE,
-	                                  &used_native);
-	g_free(dir);
-
-	if (!filename && !used_native) {
-		sdl_show_message(ui, "Receive File",
-		                 "No native file picker available.");
-	}
-
-	if (filename) {
-		dir = g_path_get_dirname(filename);
-		tilem_config_set("download", "receivefile_recentdir/f", dir,
-		                 NULL);
-		g_free(dir);
-	}
-
-	return filename;
+	return filenames;
 }
 
 static char *sdl_pick_screenshot_file(TilemSdlUi *ui)
@@ -3168,9 +4883,144 @@ static void sdl_handle_load_rom(TilemSdlUi *ui)
 	g_free(state);
 }
 
+typedef struct {
+	TilemSdlUi *ui;
+	char **filenames;
+	int nfiles;
+	int *slots;
+	TI81ProgInfo info[TI81_SLOT_MAX + 1];
+} TilemSdlSlotTask;
+
+static gboolean sdl_slot_task_main(TilemCalcEmulator *emu, gpointer data)
+{
+	TilemSdlSlotTask *task = data;
+	int i;
+
+	tilem_em_wake_up(emu, TRUE);
+	for (i = 0; i <= TI81_SLOT_MAX; i++)
+		ti81_get_program_info(emu->calc, i, &task->info[i]);
+
+	return TRUE;
+}
+
+static void sdl_slot_task_finished(G_GNUC_UNUSED TilemCalcEmulator *emu,
+                                   gpointer data,
+                                   gboolean cancelled)
+{
+	TilemSdlSlotTask *task = data;
+	TilemSdlUi *ui = task->ui;
+
+	if (!cancelled && ui) {
+		sdl_slot_dialog_clear(ui);
+		ui->menu_visible = FALSE;
+		ui->submenu_visible = FALSE;
+		ui->prefs_visible = FALSE;
+		ui->slot_dialog.visible = TRUE;
+		ui->slot_dialog.filenames = task->filenames;
+		ui->slot_dialog.nfiles = task->nfiles;
+		ui->slot_dialog.slots = task->slots;
+		memcpy(ui->slot_dialog.info, task->info,
+		       sizeof(task->info));
+		ui->slot_dialog.selected = 0;
+		ui->slot_dialog.top = 0;
+		sdl_slot_dialog_assign_defaults(&ui->slot_dialog);
+		task->filenames = NULL;
+		task->slots = NULL;
+	}
+
+	if (task->filenames)
+		g_strfreev(task->filenames);
+	g_free(task->slots);
+	g_slice_free(TilemSdlSlotTask, task);
+}
+
+static void sdl_handle_send_files(TilemSdlUi *ui, char **filenames)
+{
+	TilemSdlSlotTask *task;
+	int i;
+
+	if (!filenames || !filenames[0])
+		return;
+	if (!ui->emu || !ui->emu->calc) {
+		sdl_show_message(ui, "Send File",
+		                 "No calculator loaded yet.");
+		g_strfreev(filenames);
+		return;
+	}
+
+	if (ui->emu->calc->hw.model_id == TILEM_CALC_TI81) {
+		task = g_slice_new0(TilemSdlSlotTask);
+		task->ui = ui;
+		task->filenames = filenames;
+		task->nfiles = g_strv_length(filenames);
+		task->slots = g_new(int, task->nfiles);
+		for (i = 0; i < task->nfiles; i++)
+			task->slots[i] = TI81_SLOT_AUTO;
+		tilem_calc_emulator_begin(ui->emu, &sdl_slot_task_main,
+		                          &sdl_slot_task_finished, task);
+		return;
+	}
+
+	sdl_send_files(ui, filenames, NULL);
+	g_strfreev(filenames);
+}
+
+static void sdl_drop_begin(TilemSdlUi *ui)
+{
+	if (!ui)
+		return;
+
+	if (ui->drop_files)
+		g_ptr_array_free(ui->drop_files, TRUE);
+	ui->drop_files = g_ptr_array_new_with_free_func(g_free);
+	ui->drop_active = TRUE;
+}
+
+static void sdl_drop_file(TilemSdlUi *ui, const char *filename)
+{
+	if (!ui || !filename || !*filename)
+		return;
+
+	if (!ui->drop_active)
+		sdl_drop_begin(ui);
+
+	if (ui->drop_files)
+		g_ptr_array_add(ui->drop_files, g_strdup(filename));
+}
+
+static void sdl_drop_complete(TilemSdlUi *ui)
+{
+	char **files;
+	guint i;
+
+	if (!ui || !ui->drop_files) {
+		if (ui)
+			ui->drop_active = FALSE;
+		return;
+	}
+
+	ui->drop_active = FALSE;
+	if (ui->drop_files->len == 0) {
+		g_ptr_array_free(ui->drop_files, TRUE);
+		ui->drop_files = NULL;
+		return;
+	}
+
+	files = g_new0(char *, ui->drop_files->len + 1);
+	for (i = 0; i < ui->drop_files->len; i++) {
+		files[i] = g_strdup(g_ptr_array_index(ui->drop_files, i));
+	}
+	files[ui->drop_files->len] = NULL;
+
+	g_ptr_array_free(ui->drop_files, TRUE);
+	ui->drop_files = NULL;
+
+	sdl_handle_send_files(ui, files);
+}
+
 static void sdl_handle_send_file(TilemSdlUi *ui)
 {
-	char *filename;
+	char **filenames;
 
 	if (!ui->emu->calc) {
 		sdl_show_message(ui, "Send File",
@@ -3178,30 +5028,22 @@ static void sdl_handle_send_file(TilemSdlUi *ui)
 		return;
 	}
 
-	filename = sdl_pick_send_file(ui);
-	if (!filename)
+	filenames = sdl_pick_send_files(ui);
+	if (!filenames)
 		return;
 
-	tilem_link_send_file(ui->emu, filename, TI81_SLOT_AUTO, TRUE, TRUE);
-	g_free(filename);
+	sdl_handle_send_files(ui, filenames);
 }
 
 static void sdl_handle_receive_file(TilemSdlUi *ui)
 {
-	char *filename;
-
 	if (!ui->emu->calc) {
 		sdl_show_message(ui, "Receive File",
 		                 "No calculator loaded yet.");
 		return;
 	}
 
-	filename = sdl_pick_receive_file(ui);
-	if (!filename)
-		return;
-
-	tilem_link_receive_all(ui->emu, filename);
-	g_free(filename);
+	sdl_receive_dialog_request(ui);
 }
 
 static void sdl_handle_save_state(TilemSdlUi *ui)
@@ -3515,11 +5357,70 @@ static void sdl_handle_menu_action(TilemSdlUi *ui, TilemSdlMenuAction action,
 	}
 }
 
+static gboolean sdl_handle_shortcut(TilemSdlUi *ui, SDL_Keycode sym, int mods,
+                                    gboolean *running)
+{
+	int accel = mods & (KMOD_CTRL | KMOD_GUI);
+
+	if (sym >= 'A' && sym <= 'Z')
+		sym = sym - 'A' + 'a';
+
+	if (sym == SDLK_PAUSE) {
+		sdl_handle_debugger(ui);
+		return TRUE;
+	}
+
+	if (accel && sym == SDLK_q) {
+		if (running)
+			*running = FALSE;
+		return TRUE;
+	}
+
+	if (accel && sym == SDLK_PRINTSCREEN) {
+		if (mods & KMOD_SHIFT)
+			sdl_handle_quick_screenshot(ui);
+		else
+			sdl_handle_screenshot(ui);
+		return TRUE;
+	}
+
+	if (accel && (mods & KMOD_SHIFT) && sym == SDLK_DELETE) {
+		if (ui->emu && ui->emu->calc)
+			tilem_calc_emulator_reset(ui->emu);
+		return TRUE;
+	}
+
+	if (accel && (sym == SDLK_o || sym == SDLK_s)) {
+		if (mods & KMOD_SHIFT) {
+			if (sym == SDLK_o)
+				sdl_handle_open_calc(ui);
+			else
+				sdl_handle_save_calc(ui);
+		}
+		else {
+			if (sym == SDLK_o)
+				sdl_handle_send_file(ui);
+			else
+				sdl_handle_receive_file(ui);
+		}
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
 static void sdl_cleanup(TilemSdlUi *ui)
 {
 	if (ui->debugger) {
 		tilem_sdl_debugger_free(ui->debugger);
 		ui->debugger = NULL;
+	}
+
+	sdl_slot_dialog_clear(ui);
+	sdl_receive_dialog_clear(ui);
+	if (ui->drop_files) {
+		g_ptr_array_free(ui->drop_files, TRUE);
+		ui->drop_files = NULL;
 	}
 
 	sdl_free_skin(ui);
@@ -3543,6 +5444,7 @@ static void sdl_cleanup(TilemSdlUi *ui)
 		tilem_free(ui->lcd_palette);
 	ui->lcd_palette = NULL;
 
+	sdl_shutdown_image(ui);
 	sdl_shutdown_ttf(ui);
 }
 
@@ -3574,6 +5476,19 @@ static void sdl_init_ttf(TilemSdlUi *ui)
 	g_free(font_path);
 }
 
+static void sdl_init_image(TilemSdlUi *ui)
+{
+	int flags = IMG_INIT_PNG | IMG_INIT_JPG;
+	int inited;
+
+	inited = IMG_Init(flags);
+	if ((inited & flags) != flags) {
+		g_printerr("SDL_image init failed: %s\n", IMG_GetError());
+		return;
+	}
+	ui->image_ready = TRUE;
+}
+
 static void sdl_shutdown_ttf(TilemSdlUi *ui)
 {
 	if (ui->menu_font) {
@@ -3584,6 +5499,13 @@ static void sdl_shutdown_ttf(TilemSdlUi *ui)
 	if (TTF_WasInit())
 		TTF_Quit();
 	ui->ttf_ready = FALSE;
+}
+
+static void sdl_shutdown_image(TilemSdlUi *ui)
+{
+	if (ui->image_ready)
+		IMG_Quit();
+	ui->image_ready = FALSE;
 }
 
 int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
@@ -3622,13 +5544,10 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 		sdl_keybindings_init(ui.emu, ui.emu->calc->hw.name);
 		memset(ui.keypress_keycodes, 0, sizeof(ui.keypress_keycodes));
 		ui.sequence_keycode = 0;
-		sdl_update_skin_for_calc(&ui);
 	}
 	else {
 		ui.lcd_width = 96;
 		ui.lcd_height = 64;
-		sdl_free_skin(&ui);
-		sdl_set_palette(&ui);
 	}
 
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
@@ -3636,6 +5555,11 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 		sdl_cleanup(&ui);
 		return 1;
 	}
+	SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
+	SDL_EventState(SDL_DROPBEGIN, SDL_ENABLE);
+	SDL_EventState(SDL_DROPCOMPLETE, SDL_ENABLE);
+	sdl_init_image(&ui);
+	sdl_update_skin_for_calc(&ui);
 
 	if (zoom_factor < 1.0)
 		zoom_factor = 1.0;
@@ -3683,8 +5607,8 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 		SDL_SetWindowIcon(ui.window, ui.icons->app_surface);
 
 	if (ui.skin && !ui.skin_texture) {
-		ui.skin_texture = tilem_sdl_texture_from_pixbuf(ui.renderer,
-		                                                ui.skin->raw);
+		ui.skin_texture = SDL_CreateTextureFromSurface(
+			ui.renderer, ui.skin->surface);
 		if (!ui.skin_texture)
 			g_printerr("Unable to create SDL texture for skin\n");
 	}
@@ -3715,6 +5639,12 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 			    && tilem_sdl_debugger_handle_event(
 			           ui.debugger, &event))
 				continue;
+			if (ui.slot_dialog.visible
+			    && sdl_slot_dialog_handle_event(&ui, &event))
+				continue;
+			if (ui.receive_dialog.visible
+			    && sdl_receive_dialog_handle_event(&ui, &event))
+				continue;
 			if (ui.prefs_visible
 			    && sdl_preferences_handle_event(&ui, &event))
 				continue;
@@ -3726,6 +5656,16 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 				if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
 					sdl_update_layout(&ui, event.window.data1,
 					                  event.window.data2);
+				break;
+			case SDL_DROPBEGIN:
+				sdl_drop_begin(&ui);
+				break;
+			case SDL_DROPFILE:
+				sdl_drop_file(&ui, event.drop.file);
+				SDL_free(event.drop.file);
+				break;
+			case SDL_DROPCOMPLETE:
+				sdl_drop_complete(&ui);
 				break;
 			case SDL_MOUSEBUTTONDOWN:
 				if (event.button.button == SDL_BUTTON_RIGHT) {
@@ -3876,22 +5816,9 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 						sdl_menu_hide(&ui);
 						break;
 					}
-					if ((mods & (KMOD_CTRL | KMOD_GUI))
-					    && (sym == SDLK_o || sym == SDLK_s)) {
-						if (mods & KMOD_SHIFT) {
-							if (sym == SDLK_o)
-								sdl_handle_open_calc(&ui);
-							else
-								sdl_handle_save_calc(&ui);
-						}
-						else {
-							if (sym == SDLK_o)
-								sdl_handle_send_file(&ui);
-							else
-								sdl_handle_receive_file(&ui);
-						}
+					if (sdl_handle_shortcut(&ui, sym, mods,
+					                        &running))
 						break;
-					}
 				}
 				sdl_handle_keydown(&ui, &event.key);
 				break;
@@ -3901,6 +5828,8 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 			default:
 				break;
 			}
+		}
+		while (g_main_context_iteration(NULL, FALSE)) {
 		}
 
 		sdl_render(&ui);

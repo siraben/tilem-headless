@@ -659,6 +659,9 @@ struct dirlistinfo {
 	char *error_message;
 	gboolean aborted;
 	gboolean no_gui;
+	void (*callback)(TilemCalcEmulator *emu, GSList *list,
+	                 const char *error_message, gpointer data);
+	gpointer callback_data;
 };
 
 /* Convert tifiles VarEntry into a TilemVarEntry */
@@ -862,10 +865,14 @@ static void get_dirlist_finished(TilemCalcEmulator *emu, gpointer data,
 	GSList *l;
 	struct dirlistinfo *dl = data;
 
-	if (dl->error_message && !cancelled)
+	if (dl->callback && !cancelled && !dl->aborted) {
+		(*dl->callback)(emu, dl->list, dl->error_message,
+		                dl->callback_data);
+		dl->list = NULL;
+	} else if (dl->error_message && !cancelled) {
 		show_error(emu, "Unable to receive variable list",
 		           dl->error_message);
-	else if (!cancelled && !dl->aborted && emu->ewin && !dl->no_gui) {
+	} else if (!cancelled && !dl->aborted && emu->ewin && !dl->no_gui) {
 		if (!emu->rcvdlg)
 			emu->rcvdlg = tilem_receive_dialog_new(emu);
 		tilem_receive_dialog_update(emu->rcvdlg, dl->list);
@@ -884,7 +891,21 @@ static void get_dirlist_finished(TilemCalcEmulator *emu, gpointer data,
 
 void tilem_link_get_dirlist(TilemCalcEmulator *emu)
 {
+	tilem_link_get_dirlist_with_callback(emu, FALSE, NULL, NULL);
+}
+
+void tilem_link_get_dirlist_with_callback(TilemCalcEmulator *emu,
+                                          gboolean no_gui,
+                                          void (*callback)(TilemCalcEmulator *emu,
+                                                           GSList *list,
+                                                           const char *error_message,
+                                                           gpointer data),
+                                          gpointer data)
+{
 	struct dirlistinfo *dl = g_slice_new0(struct dirlistinfo);
+	dl->no_gui = no_gui;
+	dl->callback = callback;
+	dl->callback_data = data;
 	tilem_calc_emulator_begin(emu, &get_dirlist_main,
 	                          &get_dirlist_finished, dl);
 }
