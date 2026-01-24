@@ -39,6 +39,7 @@
 #include "skinops.h"
 #include "sdlpixbuf.h"
 #include "sdlscreenshot.h"
+#include "sdldebugger.h"
 #include "ti81prg.h"
 
 void tilem_config_get(const char *group, const char *option, ...);
@@ -96,6 +97,7 @@ typedef struct {
 	gboolean ttf_ready;
 	int keypress_keycodes[64];
 	int sequence_keycode;
+	TilemSdlDebugger *debugger;
 } TilemSdlUi;
 
 typedef enum {
@@ -106,6 +108,7 @@ typedef enum {
 	SDL_MENU_SAVE_CALC,
 	SDL_MENU_REVERT_CALC,
 	SDL_MENU_RESET,
+	SDL_MENU_DEBUGGER,
 	SDL_MENU_MACRO_MENU,
 	SDL_MENU_MACRO_BEGIN,
 	SDL_MENU_MACRO_END,
@@ -134,6 +137,7 @@ static const TilemSdlMenuItem sdl_menu_items[] = {
 	{ "Revert Calculator State", SDL_MENU_REVERT_CALC, FALSE },
 	{ "Reset Calculator", SDL_MENU_RESET, FALSE },
 	{ NULL, SDL_MENU_NONE, TRUE },
+	{ "Debugger", SDL_MENU_DEBUGGER, FALSE },
 	{ "Macro >", SDL_MENU_MACRO_MENU, FALSE },
 	{ "Screenshot...", SDL_MENU_SCREENSHOT, FALSE },
 	{ "Quick Screenshot", SDL_MENU_QUICK_SCREENSHOT, FALSE },
@@ -2282,6 +2286,8 @@ static void sdl_update_after_load(TilemSdlUi *ui)
 
 	sdl_update_skin_for_calc(ui);
 	sdl_update_layout(ui, ui->window_width, ui->window_height);
+	if (ui->debugger)
+		tilem_sdl_debugger_calc_changed(ui->debugger);
 }
 
 static void sdl_handle_load_rom(TilemSdlUi *ui)
@@ -2417,6 +2423,23 @@ static void sdl_handle_revert_calc(TilemSdlUi *ui)
 
 	if (!tilem_calc_emulator_revert_state(ui->emu, &err))
 		sdl_report_error("Unable to load calculator state", err);
+}
+
+static void sdl_handle_debugger(TilemSdlUi *ui)
+{
+	if (!ui->emu->calc) {
+		sdl_show_message(ui, "Debugger",
+		                 "No calculator loaded yet.");
+		return;
+	}
+
+	if (!ui->debugger)
+		ui->debugger = tilem_sdl_debugger_new(ui->emu);
+
+	if (tilem_sdl_debugger_visible(ui->debugger))
+		tilem_sdl_debugger_hide(ui->debugger);
+	else
+		tilem_sdl_debugger_show(ui->debugger);
 }
 
 static void sdl_handle_macro_begin(TilemSdlUi *ui)
@@ -2610,6 +2633,9 @@ static void sdl_handle_menu_action(TilemSdlUi *ui, TilemSdlMenuAction action,
 	case SDL_MENU_RESET:
 		tilem_calc_emulator_reset(ui->emu);
 		break;
+	case SDL_MENU_DEBUGGER:
+		sdl_handle_debugger(ui);
+		break;
 	case SDL_MENU_MACRO_BEGIN:
 		sdl_handle_macro_begin(ui);
 		break;
@@ -2647,6 +2673,11 @@ static void sdl_handle_menu_action(TilemSdlUi *ui, TilemSdlMenuAction action,
 
 static void sdl_cleanup(TilemSdlUi *ui)
 {
+	if (ui->debugger) {
+		tilem_sdl_debugger_free(ui->debugger);
+		ui->debugger = NULL;
+	}
+
 	sdl_free_skin(ui);
 
 	if (ui->lcd_texture)
@@ -2827,6 +2858,10 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 
 	while (running) {
 		while (SDL_PollEvent(&event)) {
+			if (ui.debugger
+			    && tilem_sdl_debugger_handle_event(
+			           ui.debugger, &event))
+				continue;
 			switch (event.type) {
 			case SDL_QUIT:
 				running = FALSE;
@@ -3013,6 +3048,8 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 		}
 
 		sdl_render(&ui);
+		if (ui.debugger)
+			tilem_sdl_debugger_render(ui.debugger);
 		SDL_Delay(SDL_FRAME_DELAY_MS);
 	}
 
