@@ -30,6 +30,11 @@
 #include "sdlicons.h"
 #include "files.h"
 
+static const int sdl_icon_sizes_app[] = { 48, 32, 24, 22, 16 };
+static const int sdl_icon_sizes_action[] = { 16, 24 };
+static const int sdl_icon_sizes_status[] = { 16 };
+static const int sdl_icon_sizes_menu[] = { 16, 24, 22, 32, 48 };
+
 static const char * const menu_icon_open_names[] = {
 	"document-open",
 	"gtk-open",
@@ -481,12 +486,20 @@ static void sdl_load_theme_icon_texture(SDL_Renderer *renderer,
 	SDL_FreeSurface(surface);
 }
 
+static void sdl_load_app_fallback_texture(SDL_Renderer *renderer,
+                                          const char *icons_root,
+                                          const int *sizes,
+                                          int n_sizes,
+                                          TilemSdlIcon *out)
+{
+	if (!out || out->texture)
+		return;
+	sdl_load_icon_texture(renderer, icons_root, "apps", "tilem",
+	                      sizes, n_sizes, out);
+}
+
 TilemSdlIcons *tilem_sdl_icons_load(SDL_Renderer *renderer)
 {
-	static const int app_sizes[] = { 48, 32, 24, 22, 16 };
-	static const int action_sizes[] = { 16, 24 };
-	static const int status_sizes[] = { 16 };
-	static const int menu_sizes[] = { 16, 24, 22, 32, 48 };
 	TilemSdlIcons *icons;
 	char *icons_root;
 
@@ -497,126 +510,146 @@ TilemSdlIcons *tilem_sdl_icons_load(SDL_Renderer *renderer)
 	icons = g_new0(TilemSdlIcons, 1);
 	icons->app_surface = sdl_load_icon_surface(icons_root, "apps",
 	                                           "tilem",
-	                                           app_sizes,
-	                                           (int) G_N_ELEMENTS(app_sizes));
+	                                           sdl_icon_sizes_app,
+	                                           (int) G_N_ELEMENTS(sdl_icon_sizes_app));
 
 	sdl_load_icon_texture(renderer, icons_root, "status",
 	                      "tilem-disasm-pc",
-	                      status_sizes,
-	                      (int) G_N_ELEMENTS(status_sizes),
+	                      sdl_icon_sizes_status,
+	                      (int) G_N_ELEMENTS(sdl_icon_sizes_status),
 	                      &icons->disasm_pc);
 	sdl_load_icon_texture(renderer, icons_root, "status",
 	                      "tilem-disasm-break",
-	                      status_sizes,
-	                      (int) G_N_ELEMENTS(status_sizes),
+	                      sdl_icon_sizes_status,
+	                      (int) G_N_ELEMENTS(sdl_icon_sizes_status),
 	                      &icons->disasm_break);
 	sdl_load_icon_texture(renderer, icons_root, "status",
 	                      "tilem-disasm-break-pc",
-	                      status_sizes,
-	                      (int) G_N_ELEMENTS(status_sizes),
+	                      sdl_icon_sizes_status,
+	                      (int) G_N_ELEMENTS(sdl_icon_sizes_status),
 	                      &icons->disasm_break_pc);
 
 	sdl_load_icon_texture(renderer, icons_root, "actions",
 	                      "tilem-db-step",
-	                      action_sizes,
-	                      (int) G_N_ELEMENTS(action_sizes),
+	                      sdl_icon_sizes_action,
+	                      (int) G_N_ELEMENTS(sdl_icon_sizes_action),
 	                      &icons->db_step);
 	sdl_load_icon_texture(renderer, icons_root, "actions",
 	                      "tilem-db-step-over",
-	                      action_sizes,
-	                      (int) G_N_ELEMENTS(action_sizes),
+	                      sdl_icon_sizes_action,
+	                      (int) G_N_ELEMENTS(sdl_icon_sizes_action),
 	                      &icons->db_step_over);
 	sdl_load_icon_texture(renderer, icons_root, "actions",
 	                      "tilem-db-finish",
-	                      action_sizes,
-	                      (int) G_N_ELEMENTS(action_sizes),
+	                      sdl_icon_sizes_action,
+	                      (int) G_N_ELEMENTS(sdl_icon_sizes_action),
 	                      &icons->db_finish);
 
 	sdl_load_theme_icon_texture(renderer,
 	                            dbg_icon_run_names,
 	                            (int) G_N_ELEMENTS(dbg_icon_run_names),
-	                            menu_sizes,
-	                            (int) G_N_ELEMENTS(menu_sizes),
+	                            sdl_icon_sizes_menu,
+	                            (int) G_N_ELEMENTS(sdl_icon_sizes_menu),
 	                            &icons->db_run);
 	sdl_load_theme_icon_texture(renderer,
 	                            dbg_icon_pause_names,
 	                            (int) G_N_ELEMENTS(dbg_icon_pause_names),
-	                            menu_sizes,
-	                            (int) G_N_ELEMENTS(menu_sizes),
+	                            sdl_icon_sizes_menu,
+	                            (int) G_N_ELEMENTS(sdl_icon_sizes_menu),
 	                            &icons->db_pause);
+	sdl_load_app_fallback_texture(renderer, icons_root,
+	                              sdl_icon_sizes_action,
+	                              (int) G_N_ELEMENTS(sdl_icon_sizes_action),
+	                              &icons->db_run);
+	sdl_load_app_fallback_texture(renderer, icons_root,
+	                              sdl_icon_sizes_action,
+	                              (int) G_N_ELEMENTS(sdl_icon_sizes_action),
+	                              &icons->db_pause);
 
 	sdl_load_theme_icon_texture(renderer,
 	                            menu_icon_open_names,
 	                            (int) G_N_ELEMENTS(menu_icon_open_names),
-	                            menu_sizes,
-	                            (int) G_N_ELEMENTS(menu_sizes),
+	                            sdl_icon_sizes_menu,
+	                            (int) G_N_ELEMENTS(sdl_icon_sizes_menu),
 	                            &icons->menu[TILEM_SDL_MENU_ICON_OPEN]);
 	sdl_load_theme_icon_texture(renderer,
 	                            menu_icon_save_names,
 	                            (int) G_N_ELEMENTS(menu_icon_save_names),
-	                            menu_sizes,
-	                            (int) G_N_ELEMENTS(menu_sizes),
+	                            sdl_icon_sizes_menu,
+	                            (int) G_N_ELEMENTS(sdl_icon_sizes_menu),
 	                            &icons->menu[TILEM_SDL_MENU_ICON_SAVE]);
 	sdl_load_theme_icon_texture(renderer,
 	                            menu_icon_save_as_names,
 	                            (int) G_N_ELEMENTS(menu_icon_save_as_names),
-	                            menu_sizes,
-	                            (int) G_N_ELEMENTS(menu_sizes),
+	                            sdl_icon_sizes_menu,
+	                            (int) G_N_ELEMENTS(sdl_icon_sizes_menu),
 	                            &icons->menu[TILEM_SDL_MENU_ICON_SAVE_AS]);
 	sdl_load_theme_icon_texture(renderer,
 	                            menu_icon_revert_names,
 	                            (int) G_N_ELEMENTS(menu_icon_revert_names),
-	                            menu_sizes,
-	                            (int) G_N_ELEMENTS(menu_sizes),
+	                            sdl_icon_sizes_menu,
+	                            (int) G_N_ELEMENTS(sdl_icon_sizes_menu),
 	                            &icons->menu[TILEM_SDL_MENU_ICON_REVERT]);
 	sdl_load_theme_icon_texture(renderer,
 	                            menu_icon_clear_names,
 	                            (int) G_N_ELEMENTS(menu_icon_clear_names),
-	                            menu_sizes,
-	                            (int) G_N_ELEMENTS(menu_sizes),
+	                            sdl_icon_sizes_menu,
+	                            (int) G_N_ELEMENTS(sdl_icon_sizes_menu),
 	                            &icons->menu[TILEM_SDL_MENU_ICON_CLEAR]);
 	sdl_load_theme_icon_texture(renderer,
 	                            menu_icon_record_names,
 	                            (int) G_N_ELEMENTS(menu_icon_record_names),
-	                            menu_sizes,
-	                            (int) G_N_ELEMENTS(menu_sizes),
+	                            sdl_icon_sizes_menu,
+	                            (int) G_N_ELEMENTS(sdl_icon_sizes_menu),
 	                            &icons->menu[TILEM_SDL_MENU_ICON_RECORD]);
 	sdl_load_theme_icon_texture(renderer,
 	                            menu_icon_stop_names,
 	                            (int) G_N_ELEMENTS(menu_icon_stop_names),
-	                            menu_sizes,
-	                            (int) G_N_ELEMENTS(menu_sizes),
+	                            sdl_icon_sizes_menu,
+	                            (int) G_N_ELEMENTS(sdl_icon_sizes_menu),
 	                            &icons->menu[TILEM_SDL_MENU_ICON_STOP]);
 	sdl_load_theme_icon_texture(renderer,
 	                            menu_icon_play_names,
 	                            (int) G_N_ELEMENTS(menu_icon_play_names),
-	                            menu_sizes,
-	                            (int) G_N_ELEMENTS(menu_sizes),
+	                            sdl_icon_sizes_menu,
+	                            (int) G_N_ELEMENTS(sdl_icon_sizes_menu),
 	                            &icons->menu[TILEM_SDL_MENU_ICON_PLAY]);
 	sdl_load_theme_icon_texture(renderer,
 	                            menu_icon_prefs_names,
 	                            (int) G_N_ELEMENTS(menu_icon_prefs_names),
-	                            menu_sizes,
-	                            (int) G_N_ELEMENTS(menu_sizes),
+	                            sdl_icon_sizes_menu,
+	                            (int) G_N_ELEMENTS(sdl_icon_sizes_menu),
 	                            &icons->menu[TILEM_SDL_MENU_ICON_PREFERENCES]);
 	sdl_load_theme_icon_texture(renderer,
 	                            menu_icon_about_names,
 	                            (int) G_N_ELEMENTS(menu_icon_about_names),
-	                            menu_sizes,
-	                            (int) G_N_ELEMENTS(menu_sizes),
+	                            sdl_icon_sizes_menu,
+	                            (int) G_N_ELEMENTS(sdl_icon_sizes_menu),
 	                            &icons->menu[TILEM_SDL_MENU_ICON_ABOUT]);
 	sdl_load_theme_icon_texture(renderer,
 	                            menu_icon_quit_names,
 	                            (int) G_N_ELEMENTS(menu_icon_quit_names),
-	                            menu_sizes,
-	                            (int) G_N_ELEMENTS(menu_sizes),
+	                            sdl_icon_sizes_menu,
+	                            (int) G_N_ELEMENTS(sdl_icon_sizes_menu),
 	                            &icons->menu[TILEM_SDL_MENU_ICON_QUIT]);
 	sdl_load_theme_icon_texture(renderer,
 	                            menu_icon_close_names,
 	                            (int) G_N_ELEMENTS(menu_icon_close_names),
-	                            menu_sizes,
-	                            (int) G_N_ELEMENTS(menu_sizes),
+	                            sdl_icon_sizes_menu,
+	                            (int) G_N_ELEMENTS(sdl_icon_sizes_menu),
 	                            &icons->menu[TILEM_SDL_MENU_ICON_CLOSE]);
+	{
+		int i;
+
+		for (i = 0; i < TILEM_SDL_MENU_ICON_COUNT; i++) {
+			sdl_load_app_fallback_texture(
+				renderer,
+				icons_root,
+				sdl_icon_sizes_menu,
+				(int) G_N_ELEMENTS(sdl_icon_sizes_menu),
+				&icons->menu[i]);
+		}
+	}
 
 	g_free(icons_root);
 	return icons;

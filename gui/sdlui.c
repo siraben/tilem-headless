@@ -95,6 +95,8 @@ typedef struct {
 	int submenu_width;
 	int submenu_height;
 	int submenu_selected;
+	gboolean prefs_visible;
+	int prefs_hover;
 	TTF_Font *menu_font;
 	gboolean ttf_ready;
 	int keypress_keycodes[64];
@@ -125,12 +127,43 @@ typedef enum {
 	SDL_MENU_QUIT
 } TilemSdlMenuAction;
 
+typedef enum {
+	SDL_PREF_ITEM_NONE = -1,
+	SDL_PREF_ITEM_SPEED_LIMIT,
+	SDL_PREF_ITEM_SPEED_FAST,
+	SDL_PREF_ITEM_GRAYSCALE,
+	SDL_PREF_ITEM_SMOOTH,
+	SDL_PREF_ITEM_USE_SKIN,
+	SDL_PREF_ITEM_SKIN_CHOOSE,
+	SDL_PREF_ITEM_CLOSE
+} TilemSdlPrefItem;
+
 typedef struct {
 	const char *label;
 	TilemSdlMenuAction action;
 	gboolean separator;
 	TilemSdlMenuIconId icon;
 } TilemSdlMenuItem;
+
+typedef struct {
+	SDL_Rect panel;
+	SDL_Rect speed_limit_rect;
+	SDL_Rect speed_fast_rect;
+	SDL_Rect grayscale_rect;
+	SDL_Rect smooth_rect;
+	SDL_Rect skin_toggle_rect;
+	SDL_Rect skin_label_rect;
+	SDL_Rect skin_value_rect;
+	SDL_Rect skin_button_rect;
+	SDL_Rect close_rect;
+	int text_h;
+	int row_h;
+	int indicator;
+	int padding;
+	int title_y;
+	int speed_header_y;
+	int display_header_y;
+} TilemSdlPrefsLayout;
 
 static const TilemSdlMenuItem sdl_menu_items[] = {
 	{ "Send File...", SDL_MENU_SEND_FILE, FALSE,
@@ -178,6 +211,8 @@ static const TilemSdlMenuItem sdl_menu_macro_items[] = {
 	{ "Save Macro...", SDL_MENU_MACRO_SAVE, FALSE,
 	  TILEM_SDL_MENU_ICON_SAVE_AS }
 };
+
+static void sdl_update_skin_for_calc(TilemSdlUi *ui);
 
 #define SDL_SCREENSHOT_DEFAULT_WIDTH_96 192
 #define SDL_SCREENSHOT_DEFAULT_HEIGHT_96 128
@@ -1152,6 +1187,79 @@ static char *sdl_default_skin_path(TilemCalcEmulator *emu)
 	return path;
 }
 
+static char *sdl_canonicalize_filename(const char *name)
+{
+#ifdef G_OS_WIN32
+	static const char delim[] = "/\\";
+#else
+	static const char delim[] = G_DIR_SEPARATOR_S;
+#endif
+	char *result, **parts, *p;
+	int i;
+
+	if (name == NULL || g_path_is_absolute(name))
+		return g_strdup(name);
+
+	result = g_get_current_dir();
+	parts = g_strsplit_set(name, delim, -1);
+	for (i = 0; parts[i]; i++) {
+		if (!strcmp(parts[i], "..")) {
+			p = g_path_get_dirname(result);
+			g_free(result);
+			result = p;
+		}
+		else if (strcmp(parts[i], ".")
+		         && strcmp(parts[i], "")) {
+			p = g_build_filename(result, parts[i], NULL);
+			g_free(result);
+			result = p;
+		}
+	}
+	g_strfreev(parts);
+	return result;
+}
+
+static gboolean sdl_file_names_equal(const char *a, const char *b)
+{
+	char *ca, *cb;
+	gboolean status;
+
+	if (a == NULL && b == NULL)
+		return TRUE;
+	else if (a == NULL || b == NULL)
+		return FALSE;
+
+	ca = sdl_canonicalize_filename(a);
+	cb = sdl_canonicalize_filename(b);
+	status = !strcmp(ca, cb);
+	g_free(ca);
+	g_free(cb);
+	return status;
+}
+
+static void sdl_save_skin_name(TilemSdlUi *ui)
+{
+	const char *model;
+	char *base, *shared;
+
+	if (!ui || !ui->emu || !ui->emu->calc)
+		return;
+	if (!ui->skin_file_name || !ui->skin)
+		return;
+
+	model = ui->emu->calc->hw.name;
+	base = g_path_get_basename(ui->skin_file_name);
+	shared = get_shared_file_path("skins", base, NULL);
+
+	if (sdl_file_names_equal(shared, ui->skin_file_name))
+		tilem_config_set(model, "skin/f", base, NULL);
+	else
+		tilem_config_set(model, "skin/f", ui->skin_file_name, NULL);
+
+	g_free(base);
+	g_free(shared);
+}
+
 static void sdl_free_skin(TilemSdlUi *ui)
 {
 	if (ui->skin_texture)
@@ -1666,6 +1774,650 @@ static void sdl_render_menu(TilemSdlUi *ui)
 	}
 }
 
+static int sdl_pref_text_height(TilemSdlUi *ui)
+{
+	return ui->menu_font ? TTF_FontHeight(ui->menu_font)
+	                     : 8 * SDL_MENU_FONT_SCALE;
+}
+
+static gboolean sdl_point_in_rect(int x, int y, const SDL_Rect *rect)
+{
+	if (!rect)
+		return FALSE;
+	if (x < rect->x || y < rect->y)
+		return FALSE;
+	if (x >= rect->x + rect->w || y >= rect->y + rect->h)
+		return FALSE;
+	return TRUE;
+}
+
+static char *sdl_pref_trim_text(TilemSdlUi *ui, const char *text,
+                                int max_width)
+{
+	const char *start;
+	int ellipsis_w;
+
+	if (!text)
+		return g_strdup("");
+
+	if (sdl_menu_text_width(ui, text) <= max_width)
+		return g_strdup(text);
+
+	ellipsis_w = sdl_menu_text_width(ui, "...");
+	if (ellipsis_w >= max_width)
+		return g_strdup("...");
+
+	start = text;
+	while (*start
+	       && sdl_menu_text_width(ui, start) + ellipsis_w > max_width)
+		start++;
+
+	return g_strdup_printf("...%s", start);
+}
+
+static void sdl_draw_filled_circle(SDL_Renderer *renderer, int cx, int cy,
+                                   int radius, SDL_Color color)
+{
+	int x, y;
+
+	SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
+	for (y = -radius; y <= radius; y++) {
+		for (x = -radius; x <= radius; x++) {
+			if (x * x + y * y <= radius * radius)
+				SDL_RenderDrawPoint(renderer, cx + x, cy + y);
+		}
+	}
+}
+
+static void sdl_draw_checkbox(SDL_Renderer *renderer, SDL_Rect rect,
+                              gboolean checked,
+                              SDL_Color border, SDL_Color fill,
+                              SDL_Color mark)
+{
+	SDL_Rect inner;
+
+	SDL_SetRenderDrawColor(renderer, fill.r, fill.g, fill.b, fill.a);
+	SDL_RenderFillRect(renderer, &rect);
+	SDL_SetRenderDrawColor(renderer, border.r, border.g, border.b,
+	                       border.a);
+	SDL_RenderDrawRect(renderer, &rect);
+
+	if (!checked)
+		return;
+
+	inner.x = rect.x + 3;
+	inner.y = rect.y + 3;
+	inner.w = MAX(rect.w - 6, 1);
+	inner.h = MAX(rect.h - 6, 1);
+	SDL_SetRenderDrawColor(renderer, mark.r, mark.g, mark.b, mark.a);
+	SDL_RenderFillRect(renderer, &inner);
+}
+
+static void sdl_draw_radio(SDL_Renderer *renderer, SDL_Rect rect,
+                           gboolean checked,
+                           SDL_Color border, SDL_Color fill,
+                           SDL_Color mark)
+{
+	int radius = MIN(rect.w, rect.h) / 2;
+	int cx = rect.x + rect.w / 2;
+	int cy = rect.y + rect.h / 2;
+
+	sdl_draw_filled_circle(renderer, cx, cy, radius, border);
+	if (radius > 1)
+		sdl_draw_filled_circle(renderer, cx, cy, radius - 1, fill);
+	if (checked)
+		sdl_draw_filled_circle(renderer, cx, cy, radius / 2, mark);
+}
+
+static void sdl_preferences_layout(TilemSdlUi *ui,
+                                   TilemSdlPrefsLayout *layout)
+{
+	int text_h = sdl_pref_text_height(ui);
+	int row_h = MAX(text_h + 8, 22);
+	int padding = 18;
+	int panel_w = ui->window_width - 40;
+	int content_x;
+	int content_w;
+	int button_w;
+	int close_w;
+	int panel_h;
+	int panel_x;
+	int panel_y;
+	int y;
+	int label_w;
+
+	if (panel_w > 520)
+		panel_w = 520;
+	if (panel_w < 240)
+		panel_w = MAX(ui->window_width - 10, 200);
+
+	button_w = sdl_menu_text_width(ui, "Choose...") + 20;
+	close_w = sdl_menu_text_width(ui, "Close") + 24;
+
+	panel_h = padding + text_h + 8;
+	panel_h += 10;
+	panel_h += text_h + 6;
+	panel_h += row_h * 2;
+	panel_h += 10;
+	panel_h += text_h + 6;
+	panel_h += row_h * 4;
+	panel_h += 10;
+	panel_h += row_h;
+	panel_h += padding;
+
+	panel_x = (ui->window_width - panel_w) / 2;
+	panel_y = (ui->window_height - panel_h) / 2;
+	if (panel_x < 0)
+		panel_x = 0;
+	if (panel_y < 0)
+		panel_y = 0;
+
+	layout->panel.x = panel_x;
+	layout->panel.y = panel_y;
+	layout->panel.w = panel_w;
+	layout->panel.h = panel_h;
+	layout->text_h = text_h;
+	layout->row_h = row_h;
+	layout->indicator = MIN(row_h - 6, 18);
+	layout->padding = padding;
+
+	content_x = panel_x + padding;
+	content_w = panel_w - padding * 2;
+	y = panel_y + padding;
+
+	layout->title_y = y;
+	y += text_h + 8;
+	layout->speed_header_y = y;
+	y += text_h + 6;
+
+	layout->speed_limit_rect = (SDL_Rect) {
+		content_x, y, content_w, row_h
+	};
+	y += row_h;
+	layout->speed_fast_rect = (SDL_Rect) {
+		content_x, y, content_w, row_h
+	};
+	y += row_h + 10;
+
+	layout->display_header_y = y;
+	y += text_h + 6;
+
+	layout->grayscale_rect = (SDL_Rect) {
+		content_x, y, content_w, row_h
+	};
+	y += row_h;
+	layout->smooth_rect = (SDL_Rect) {
+		content_x, y, content_w, row_h
+	};
+	y += row_h;
+	layout->skin_toggle_rect = (SDL_Rect) {
+		content_x, y, content_w, row_h
+	};
+	y += row_h;
+
+	label_w = sdl_menu_text_width(ui, "Skin file:");
+	layout->skin_label_rect = (SDL_Rect) {
+		content_x, y, label_w, row_h
+	};
+	layout->skin_button_rect = (SDL_Rect) {
+		content_x + content_w - button_w,
+		y + (row_h - (row_h - 4)) / 2,
+		button_w,
+		row_h - 4
+	};
+	layout->skin_value_rect = (SDL_Rect) {
+		content_x + label_w + 8,
+		y,
+		MAX(content_w - label_w - 8 - button_w - 8, 0),
+		row_h
+	};
+	y += row_h + 10;
+
+	layout->close_rect = (SDL_Rect) {
+		content_x + content_w - close_w,
+		y,
+		close_w,
+		row_h
+	};
+}
+
+static TilemSdlPrefItem sdl_preferences_hit_test(
+	TilemSdlUi *ui,
+	const TilemSdlPrefsLayout *layout,
+	int x, int y)
+{
+	(void) ui;
+
+	if (!sdl_point_in_rect(x, y, &layout->panel))
+		return SDL_PREF_ITEM_NONE;
+	if (sdl_point_in_rect(x, y, &layout->skin_button_rect))
+		return SDL_PREF_ITEM_SKIN_CHOOSE;
+	if (sdl_point_in_rect(x, y, &layout->speed_limit_rect))
+		return SDL_PREF_ITEM_SPEED_LIMIT;
+	if (sdl_point_in_rect(x, y, &layout->speed_fast_rect))
+		return SDL_PREF_ITEM_SPEED_FAST;
+	if (sdl_point_in_rect(x, y, &layout->grayscale_rect))
+		return SDL_PREF_ITEM_GRAYSCALE;
+	if (sdl_point_in_rect(x, y, &layout->smooth_rect))
+		return SDL_PREF_ITEM_SMOOTH;
+	if (sdl_point_in_rect(x, y, &layout->skin_toggle_rect))
+		return SDL_PREF_ITEM_USE_SKIN;
+	if (sdl_point_in_rect(x, y, &layout->close_rect))
+		return SDL_PREF_ITEM_CLOSE;
+	return SDL_PREF_ITEM_NONE;
+}
+
+static void sdl_preferences_open(TilemSdlUi *ui)
+{
+	if (!ui)
+		return;
+	ui->prefs_visible = TRUE;
+	ui->prefs_hover = SDL_PREF_ITEM_NONE;
+	sdl_menu_hide(ui);
+}
+
+static void sdl_preferences_close(TilemSdlUi *ui)
+{
+	if (!ui)
+		return;
+	ui->prefs_visible = FALSE;
+	ui->prefs_hover = SDL_PREF_ITEM_NONE;
+}
+
+static void sdl_preferences_set_limit_speed(TilemSdlUi *ui, gboolean limit)
+{
+	if (!ui || !ui->emu)
+		return;
+	tilem_calc_emulator_set_limit_speed(ui->emu, limit);
+	tilem_config_set("emulation", "limit_speed/b", limit, NULL);
+}
+
+static void sdl_preferences_set_grayscale(TilemSdlUi *ui, gboolean enable)
+{
+	if (!ui || !ui->emu)
+		return;
+	tilem_calc_emulator_set_grayscale(ui->emu, enable);
+	tilem_config_set("emulation", "grayscale/b", enable, NULL);
+}
+
+static void sdl_preferences_set_smooth(TilemSdlUi *ui, gboolean enable)
+{
+	if (!ui)
+		return;
+	ui->lcd_smooth_scale = enable;
+	tilem_config_set("settings", "smooth_scaling/b", enable, NULL);
+}
+
+static void sdl_preferences_set_skin_enabled(TilemSdlUi *ui, gboolean enable)
+{
+	if (!ui)
+		return;
+	if (ui->skin_locked)
+		return;
+
+	ui->skin_disabled = !enable;
+	tilem_config_set("settings", "skin_disabled/b", ui->skin_disabled, NULL);
+	if (ui->emu && ui->emu->calc) {
+		sdl_update_skin_for_calc(ui);
+		sdl_update_layout(ui, ui->window_width, ui->window_height);
+	}
+}
+
+static void sdl_preferences_choose_skin(TilemSdlUi *ui)
+{
+	char *dir = NULL;
+	char *filename = NULL;
+	GError *err = NULL;
+	gboolean prev_disabled;
+
+	if (!ui || !ui->emu || !ui->emu->calc) {
+		sdl_show_message(ui, "Preferences",
+		                 "Load a calculator first.");
+		return;
+	}
+	if (ui->skin_locked)
+		return;
+
+	if (ui->skin_file_name)
+		dir = g_path_get_dirname(ui->skin_file_name);
+	else
+		dir = get_shared_dir_path("skins", NULL);
+	if (!dir)
+		dir = g_get_current_dir();
+
+	filename = sdl_native_file_dialog("Select Skin",
+	                                  dir, NULL, FALSE, NULL);
+	g_free(dir);
+
+	if (!filename)
+		return;
+
+	prev_disabled = ui->skin_disabled;
+	if (!sdl_load_skin(ui, filename, &err)) {
+		sdl_report_error("Unable to load skin", err);
+		ui->skin_disabled = prev_disabled;
+		sdl_update_skin_for_calc(ui);
+		g_free(filename);
+		return;
+	}
+
+	ui->skin_disabled = FALSE;
+	tilem_config_set("settings", "skin_disabled/b", FALSE, NULL);
+	sdl_set_palette(ui);
+	sdl_update_layout(ui, ui->window_width, ui->window_height);
+	sdl_save_skin_name(ui);
+	g_free(filename);
+}
+
+static gboolean sdl_preferences_handle_event(TilemSdlUi *ui,
+                                             const SDL_Event *event)
+{
+	TilemSdlPrefsLayout layout;
+	TilemSdlPrefItem hit;
+	gboolean skin_controls_enabled;
+	gboolean skin_file_enabled;
+
+	if (!ui || !ui->prefs_visible || !event)
+		return FALSE;
+
+	sdl_preferences_layout(ui, &layout);
+	skin_controls_enabled = !ui->skin_locked
+		&& ui->emu && ui->emu->calc;
+	skin_file_enabled = skin_controls_enabled && !ui->skin_disabled;
+
+	switch (event->type) {
+	case SDL_MOUSEMOTION:
+		ui->prefs_hover = sdl_preferences_hit_test(
+			ui, &layout, event->motion.x, event->motion.y);
+		return TRUE;
+	case SDL_MOUSEBUTTONDOWN:
+		if (event->button.button != SDL_BUTTON_LEFT) {
+			return TRUE;
+		}
+		if (!sdl_point_in_rect(event->button.x,
+		                       event->button.y,
+		                       &layout.panel)) {
+			sdl_preferences_close(ui);
+			return TRUE;
+		}
+		hit = sdl_preferences_hit_test(ui, &layout,
+		                               event->button.x,
+		                               event->button.y);
+		switch (hit) {
+		case SDL_PREF_ITEM_SPEED_LIMIT:
+			sdl_preferences_set_limit_speed(ui, TRUE);
+			break;
+		case SDL_PREF_ITEM_SPEED_FAST:
+			sdl_preferences_set_limit_speed(ui, FALSE);
+			break;
+		case SDL_PREF_ITEM_GRAYSCALE:
+			if (ui->emu) {
+				sdl_preferences_set_grayscale(
+					ui, !ui->emu->grayscale);
+			}
+			break;
+		case SDL_PREF_ITEM_SMOOTH:
+			sdl_preferences_set_smooth(ui, !ui->lcd_smooth_scale);
+			break;
+		case SDL_PREF_ITEM_USE_SKIN:
+			if (skin_controls_enabled) {
+				sdl_preferences_set_skin_enabled(
+					ui, ui->skin_disabled);
+			}
+			break;
+		case SDL_PREF_ITEM_SKIN_CHOOSE:
+			if (skin_file_enabled)
+				sdl_preferences_choose_skin(ui);
+			break;
+		case SDL_PREF_ITEM_CLOSE:
+			sdl_preferences_close(ui);
+			break;
+		default:
+			break;
+		}
+		return TRUE;
+	case SDL_KEYDOWN:
+		if (event->key.keysym.sym == SDLK_ESCAPE)
+			sdl_preferences_close(ui);
+		return TRUE;
+	case SDL_MOUSEBUTTONUP:
+		return TRUE;
+	default:
+		break;
+	}
+
+	return FALSE;
+}
+
+static void sdl_render_preferences(TilemSdlUi *ui)
+{
+	TilemSdlPrefsLayout layout;
+	SDL_Color overlay = { 0, 0, 0, 150 };
+	SDL_Color panel = { 45, 45, 45, 240 };
+	SDL_Color border = { 90, 90, 90, 255 };
+	SDL_Color text = { 230, 230, 230, 255 };
+	SDL_Color dim = { 160, 160, 160, 255 };
+	SDL_Color disabled = { 110, 110, 110, 255 };
+	SDL_Color highlight = { 70, 120, 180, 120 };
+	SDL_Color indicator_fill = { 30, 30, 30, 255 };
+	SDL_Color indicator_mark = { 210, 210, 210, 255 };
+	SDL_Color button_fill = { 70, 70, 70, 255 };
+	SDL_Color button_hover = { 90, 90, 90, 255 };
+	SDL_Rect row;
+	int indicator_size;
+	int indicator_x;
+	int indicator_y;
+	gboolean skin_controls_enabled;
+	gboolean skin_file_enabled;
+	const char *skin_label = "Skin file:";
+	char *skin_value;
+
+	if (!ui || !ui->prefs_visible)
+		return;
+
+	sdl_preferences_layout(ui, &layout);
+	indicator_size = layout.indicator;
+	skin_controls_enabled = !ui->skin_locked
+		&& ui->emu && ui->emu->calc;
+	skin_file_enabled = skin_controls_enabled && !ui->skin_disabled;
+
+	SDL_SetRenderDrawBlendMode(ui->renderer, SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(ui->renderer, overlay.r, overlay.g,
+	                       overlay.b, overlay.a);
+	SDL_RenderFillRect(ui->renderer, NULL);
+
+	SDL_SetRenderDrawColor(ui->renderer, panel.r, panel.g,
+	                       panel.b, panel.a);
+	SDL_RenderFillRect(ui->renderer, &layout.panel);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &layout.panel);
+
+	sdl_draw_text_menu(ui,
+	                   layout.panel.x + layout.padding,
+	                   layout.title_y,
+	                   "Preferences",
+	                   text);
+
+	sdl_draw_text_menu(ui,
+	                   layout.panel.x + layout.padding,
+	                   layout.speed_header_y,
+	                   "Emulation Speed",
+	                   dim);
+
+	row = layout.speed_limit_rect;
+	if (ui->prefs_hover == SDL_PREF_ITEM_SPEED_LIMIT) {
+		SDL_SetRenderDrawColor(ui->renderer, highlight.r,
+		                       highlight.g, highlight.b,
+		                       highlight.a);
+		SDL_RenderFillRect(ui->renderer, &row);
+	}
+	indicator_x = row.x + 4;
+	indicator_y = row.y + (row.h - indicator_size) / 2;
+	sdl_draw_radio(ui->renderer,
+	               (SDL_Rect) { indicator_x, indicator_y,
+	                            indicator_size, indicator_size },
+	               ui->emu && ui->emu->limit_speed,
+	               border, indicator_fill, indicator_mark);
+	sdl_draw_text_menu(ui, indicator_x + indicator_size + 8,
+	                   row.y + (row.h - layout.text_h) / 2,
+	                   "Limit to actual calculator speed",
+	                   text);
+
+	row = layout.speed_fast_rect;
+	if (ui->prefs_hover == SDL_PREF_ITEM_SPEED_FAST) {
+		SDL_SetRenderDrawColor(ui->renderer, highlight.r,
+		                       highlight.g, highlight.b,
+		                       highlight.a);
+		SDL_RenderFillRect(ui->renderer, &row);
+	}
+	indicator_x = row.x + 4;
+	indicator_y = row.y + (row.h - indicator_size) / 2;
+	sdl_draw_radio(ui->renderer,
+	               (SDL_Rect) { indicator_x, indicator_y,
+	                            indicator_size, indicator_size },
+	               ui->emu && !ui->emu->limit_speed,
+	               border, indicator_fill, indicator_mark);
+	sdl_draw_text_menu(ui, indicator_x + indicator_size + 8,
+	                   row.y + (row.h - layout.text_h) / 2,
+	                   "As fast as possible",
+	                   text);
+
+	sdl_draw_text_menu(ui,
+	                   layout.panel.x + layout.padding,
+	                   layout.display_header_y,
+	                   "Display",
+	                   dim);
+
+	row = layout.grayscale_rect;
+	if (ui->prefs_hover == SDL_PREF_ITEM_GRAYSCALE) {
+		SDL_SetRenderDrawColor(ui->renderer, highlight.r,
+		                       highlight.g, highlight.b,
+		                       highlight.a);
+		SDL_RenderFillRect(ui->renderer, &row);
+	}
+	indicator_x = row.x + 4;
+	indicator_y = row.y + (row.h - indicator_size) / 2;
+	sdl_draw_checkbox(ui->renderer,
+	                  (SDL_Rect) { indicator_x, indicator_y,
+	                               indicator_size, indicator_size },
+	                  ui->emu && ui->emu->grayscale,
+	                  border, indicator_fill, indicator_mark);
+	sdl_draw_text_menu(ui, indicator_x + indicator_size + 8,
+	                   row.y + (row.h - layout.text_h) / 2,
+	                   "Emulate grayscale",
+	                   text);
+
+	row = layout.smooth_rect;
+	if (ui->prefs_hover == SDL_PREF_ITEM_SMOOTH) {
+		SDL_SetRenderDrawColor(ui->renderer, highlight.r,
+		                       highlight.g, highlight.b,
+		                       highlight.a);
+		SDL_RenderFillRect(ui->renderer, &row);
+	}
+	indicator_x = row.x + 4;
+	indicator_y = row.y + (row.h - indicator_size) / 2;
+	sdl_draw_checkbox(ui->renderer,
+	                  (SDL_Rect) { indicator_x, indicator_y,
+	                               indicator_size, indicator_size },
+	                  ui->lcd_smooth_scale,
+	                  border, indicator_fill, indicator_mark);
+	sdl_draw_text_menu(ui, indicator_x + indicator_size + 8,
+	                   row.y + (row.h - layout.text_h) / 2,
+	                   "Use smooth scaling",
+	                   text);
+
+	row = layout.skin_toggle_rect;
+	if (ui->prefs_hover == SDL_PREF_ITEM_USE_SKIN) {
+		SDL_SetRenderDrawColor(ui->renderer, highlight.r,
+		                       highlight.g, highlight.b,
+		                       highlight.a);
+		SDL_RenderFillRect(ui->renderer, &row);
+	}
+	indicator_x = row.x + 4;
+	indicator_y = row.y + (row.h - indicator_size) / 2;
+	sdl_draw_checkbox(ui->renderer,
+	                  (SDL_Rect) { indicator_x, indicator_y,
+	                               indicator_size, indicator_size },
+	                  skin_controls_enabled && !ui->skin_disabled,
+	                  border, indicator_fill, indicator_mark);
+	sdl_draw_text_menu(ui, indicator_x + indicator_size + 8,
+	                   row.y + (row.h - layout.text_h) / 2,
+	                   "Use skin",
+	                   skin_controls_enabled ? text : disabled);
+
+	if (ui->skin_disabled)
+		skin_value = g_strdup("Disabled");
+	else if (ui->skin_file_name)
+		skin_value = sdl_pref_trim_text(
+			ui, ui->skin_file_name, layout.skin_value_rect.w);
+	else
+		skin_value = g_strdup("Default skin");
+
+	sdl_draw_text_menu(ui,
+	                   layout.skin_label_rect.x,
+	                   layout.skin_label_rect.y
+	                       + (layout.skin_label_rect.h - layout.text_h) / 2,
+	                   skin_label,
+	                   skin_controls_enabled ? dim : disabled);
+	sdl_draw_text_menu(ui,
+	                   layout.skin_value_rect.x,
+	                   layout.skin_value_rect.y
+	                       + (layout.skin_value_rect.h - layout.text_h) / 2,
+	                   skin_value,
+	                   skin_file_enabled ? text : disabled);
+
+	SDL_SetRenderDrawColor(ui->renderer,
+	                       (ui->prefs_hover == SDL_PREF_ITEM_SKIN_CHOOSE
+	                        && skin_file_enabled)
+	                           ? button_hover.r
+	                           : button_fill.r,
+	                       (ui->prefs_hover == SDL_PREF_ITEM_SKIN_CHOOSE
+	                        && skin_file_enabled)
+	                           ? button_hover.g
+	                           : button_fill.g,
+	                       (ui->prefs_hover == SDL_PREF_ITEM_SKIN_CHOOSE
+	                        && skin_file_enabled)
+	                           ? button_hover.b
+	                           : button_fill.b,
+	                       255);
+	SDL_RenderFillRect(ui->renderer, &layout.skin_button_rect);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &layout.skin_button_rect);
+	sdl_draw_text_menu(ui,
+	                   layout.skin_button_rect.x + 10,
+	                   layout.skin_button_rect.y
+	                       + (layout.skin_button_rect.h - layout.text_h) / 2,
+	                   "Choose...",
+	                   skin_file_enabled ? text : disabled);
+
+	SDL_SetRenderDrawColor(ui->renderer,
+	                       ui->prefs_hover == SDL_PREF_ITEM_CLOSE
+	                           ? button_hover.r
+	                           : button_fill.r,
+	                       ui->prefs_hover == SDL_PREF_ITEM_CLOSE
+	                           ? button_hover.g
+	                           : button_fill.g,
+	                       ui->prefs_hover == SDL_PREF_ITEM_CLOSE
+	                           ? button_hover.b
+	                           : button_fill.b,
+	                       255);
+	SDL_RenderFillRect(ui->renderer, &layout.close_rect);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &layout.close_rect);
+	sdl_draw_text_menu(ui,
+	                   layout.close_rect.x + 12,
+	                   layout.close_rect.y
+	                       + (layout.close_rect.h - layout.text_h) / 2,
+	                   "Close",
+	                   text);
+
+	SDL_SetRenderDrawBlendMode(ui->renderer, SDL_BLENDMODE_NONE);
+	g_free(skin_value);
+}
+
 static void sdl_render_lcd(TilemSdlUi *ui)
 {
 	SDL_Color text_color = { 200, 200, 200, 255 };
@@ -1724,6 +2476,7 @@ static void sdl_render(TilemSdlUi *ui)
 
 	sdl_render_lcd(ui);
 	sdl_render_menu(ui);
+	sdl_render_preferences(ui);
 	SDL_RenderPresent(ui->renderer);
 }
 
@@ -2679,17 +3432,7 @@ static void sdl_handle_quick_screenshot(TilemSdlUi *ui)
 
 static void sdl_handle_preferences(TilemSdlUi *ui)
 {
-	char *config_path;
-	char *message;
-
-	config_path = get_config_file_path("config.ini", NULL);
-	message = g_strdup_printf("Preferences are stored in:\n%s",
-	                          config_path);
-	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION,
-	                         "Preferences", message,
-	                         ui ? ui->window : NULL);
-	g_free(config_path);
-	g_free(message);
+	sdl_preferences_open(ui);
 }
 
 static void sdl_handle_about(TilemSdlUi *ui)
@@ -2971,6 +3714,9 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 			if (ui.debugger
 			    && tilem_sdl_debugger_handle_event(
 			           ui.debugger, &event))
+				continue;
+			if (ui.prefs_visible
+			    && sdl_preferences_handle_event(&ui, &event))
 				continue;
 			switch (event.type) {
 			case SDL_QUIT:

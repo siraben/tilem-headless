@@ -243,6 +243,7 @@ static void sdl_dbg_start_input(TilemSdlDebugger *dbg,
                                 TilemSdlInputMode mode,
                                 const char *prefill);
 static void sdl_dbg_toggle_breakpoints_dialog(TilemSdlDebugger *dbg);
+static void sdl_dbg_cancel_step_bp(TilemSdlDebugger *dbg);
 static void sdl_dbg_set_mem_mode(TilemSdlDebugger *dbg, gboolean logical);
 static void sdl_dbg_go_to_pc(TilemSdlDebugger *dbg);
 static void sdl_dbg_go_to_stack_pos(TilemSdlDebugger *dbg, int pos);
@@ -279,21 +280,23 @@ static char *sdl_dbg_find_mono_font_path(void)
 	return NULL;
 }
 
-static void sdl_dbg_draw_text(TilemSdlDebugger *dbg, int x, int y,
-                              const char *text, SDL_Color color)
+static void sdl_dbg_draw_text_to(TilemSdlDebugger *dbg,
+                                 SDL_Renderer *renderer,
+                                 int x, int y,
+                                 const char *text, SDL_Color color)
 {
 	SDL_Surface *surface;
 	SDL_Texture *texture;
 	SDL_Rect dst;
 
-	if (!dbg->font || !text || !*text)
+	if (!dbg || !renderer || !dbg->font || !text || !*text)
 		return;
 
 	surface = TTF_RenderUTF8_Blended(dbg->font, text, color);
 	if (!surface)
 		return;
 
-	texture = SDL_CreateTextureFromSurface(dbg->renderer, surface);
+	texture = SDL_CreateTextureFromSurface(renderer, surface);
 	if (!texture) {
 		SDL_FreeSurface(surface);
 		return;
@@ -303,9 +306,17 @@ static void sdl_dbg_draw_text(TilemSdlDebugger *dbg, int x, int y,
 	dst.y = y;
 	dst.w = surface->w;
 	dst.h = surface->h;
-	SDL_RenderCopy(dbg->renderer, texture, NULL, &dst);
+	SDL_RenderCopy(renderer, texture, NULL, &dst);
 	SDL_DestroyTexture(texture);
 	SDL_FreeSurface(surface);
+}
+
+static void sdl_dbg_draw_text(TilemSdlDebugger *dbg, int x, int y,
+                              const char *text, SDL_Color color)
+{
+	if (!dbg)
+		return;
+	sdl_dbg_draw_text_to(dbg, dbg->renderer, x, y, text, color);
 }
 
 static int sdl_dbg_text_width(TilemSdlDebugger *dbg, const char *text)
@@ -839,6 +850,7 @@ static void sdl_dbg_handle_menu_action(TilemSdlDebugger *dbg,
 
 	switch (action) {
 	case SDL_DBG_MENU_ACTION_RUN:
+		sdl_dbg_cancel_step_bp(dbg);
 		tilem_calc_emulator_run(dbg->emu);
 		break;
 	case SDL_DBG_MENU_ACTION_PAUSE:
@@ -1994,8 +2006,8 @@ static void sdl_dbg_keypad_render(TilemSdlDebugger *dbg)
 	SDL_SetRenderDrawColor(dbg->keypad.renderer, bg.r, bg.g, bg.b, bg.a);
 	SDL_RenderClear(dbg->keypad.renderer);
 
-	sdl_dbg_draw_text(dbg, margin, margin,
-	                  "Outputs (click to toggle when paused)", text);
+	sdl_dbg_draw_text_to(dbg, dbg->keypad.renderer, margin, margin,
+	                     "Outputs (click to toggle when paused)", text);
 
 	for (i = 0; i < SDL_DEBUGGER_KEYPAD_ROWS; i++) {
 		SDL_Rect rect;
@@ -2018,8 +2030,9 @@ static void sdl_dbg_keypad_render(TilemSdlDebugger *dbg)
 		SDL_RenderDrawRect(dbg->keypad.renderer, &rect);
 
 		snprintf(label, sizeof(label), "O%d", i);
-		sdl_dbg_draw_text(dbg, rect.x + 6, rect.y + 2,
-		                  label, text);
+		sdl_dbg_draw_text_to(dbg, dbg->keypad.renderer,
+		                     rect.x + 6, rect.y + 2,
+		                     label, text);
 	}
 
 	for (i = 0; i < SDL_DEBUGGER_KEYPAD_ROWS; i++) {
@@ -2049,8 +2062,9 @@ static void sdl_dbg_keypad_render(TilemSdlDebugger *dbg)
 				                       border.r, border.g,
 				                       border.b, border.a);
 				SDL_RenderDrawRect(dbg->keypad.renderer, &rect);
-				sdl_dbg_draw_text(dbg, rect.x + 6, rect.y + 2,
-				                  name, text);
+				sdl_dbg_draw_text_to(dbg, dbg->keypad.renderer,
+				                     rect.x + 6, rect.y + 2,
+				                     name, text);
 			}
 		}
 	}
@@ -2058,7 +2072,8 @@ static void sdl_dbg_keypad_render(TilemSdlDebugger *dbg)
 	if (dbg->emu->paused) {
 		int in_y = grid_y + SDL_DEBUGGER_KEYPAD_COLS * (cell_h + 4)
 			+ dbg->line_height;
-		sdl_dbg_draw_text(dbg, margin, in_y, "Inputs:", text);
+		sdl_dbg_draw_text_to(dbg, dbg->keypad.renderer,
+		                     margin, in_y, "Inputs:", text);
 		for (j = 0; j < SDL_DEBUGGER_KEYPAD_COLS; j++) {
 			SDL_Rect rect;
 			gboolean active = (inval & (1 << j)) != 0;
@@ -2081,8 +2096,9 @@ static void sdl_dbg_keypad_render(TilemSdlDebugger *dbg)
 			                       border.b, border.a);
 			SDL_RenderDrawRect(dbg->keypad.renderer, &rect);
 			snprintf(label, sizeof(label), "I%d", j);
-			sdl_dbg_draw_text(dbg, rect.x + 6, rect.y + 2,
-			                  label, text);
+			sdl_dbg_draw_text_to(dbg, dbg->keypad.renderer,
+			                     rect.x + 6, rect.y + 2,
+			                     label, text);
 		}
 	}
 
