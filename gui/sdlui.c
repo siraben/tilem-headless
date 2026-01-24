@@ -253,6 +253,8 @@ typedef struct {
 	int submenu_selected;
 	gboolean prefs_visible;
 	int prefs_hover;
+	gboolean about_visible;
+	int about_hover;
 	TilemSdlSlotDialog slot_dialog;
 	TilemSdlReceiveDialog receive_dialog;
 	TilemSdlScreenshotDialog screenshot_dialog;
@@ -300,6 +302,13 @@ typedef enum {
 	SDL_PREF_ITEM_CLOSE
 } TilemSdlPrefItem;
 
+typedef enum {
+	SDL_ABOUT_ITEM_NONE = -1,
+	SDL_ABOUT_ITEM_LINK_MAIN,
+	SDL_ABOUT_ITEM_LINK_SDL,
+	SDL_ABOUT_ITEM_CLOSE
+} TilemSdlAboutItem;
+
 typedef struct {
 	const char *label;
 	TilemSdlMenuAction action;
@@ -326,6 +335,15 @@ typedef struct {
 	int speed_header_y;
 	int display_header_y;
 } TilemSdlPrefsLayout;
+
+typedef struct {
+	SDL_Rect panel;
+	SDL_Rect link_main_rect;
+	SDL_Rect link_sdl_rect;
+	SDL_Rect close_rect;
+	int text_h;
+	int padding;
+} TilemSdlAboutLayout;
 
 typedef struct {
 	SDL_Rect panel;
@@ -2508,6 +2526,274 @@ static void sdl_preferences_close(TilemSdlUi *ui)
 		return;
 	ui->prefs_visible = FALSE;
 	ui->prefs_hover = SDL_PREF_ITEM_NONE;
+}
+
+static void sdl_about_layout(TilemSdlUi *ui, TilemSdlAboutLayout *layout)
+{
+	int text_h = sdl_pref_text_height(ui);
+	int padding = 18;
+	int panel_w = ui->window_width - 40;
+	int panel_h;
+	int panel_x;
+	int panel_y;
+	int row_h = text_h + 4;
+	int lines = 10;
+	int close_w;
+	int x;
+	int y;
+	int label_w;
+	const char *url_main = "http://lpg.ticalc.org/prj_tilem/";
+	const char *url_sdl =
+		"https://github.com/siraben/tilem-headless/commits/sdl-rewrite";
+
+	if (panel_w > 620)
+		panel_w = 620;
+	if (panel_w < 320)
+		panel_w = MAX(ui->window_width - 10, 240);
+
+	panel_h = padding * 2 + row_h * lines + 24 + text_h;
+	panel_x = (ui->window_width - panel_w) / 2;
+	panel_y = (ui->window_height - panel_h) / 2;
+	if (panel_x < 0)
+		panel_x = 0;
+	if (panel_y < 0)
+		panel_y = 0;
+
+	layout->panel = (SDL_Rect) { panel_x, panel_y, panel_w, panel_h };
+	layout->text_h = text_h;
+	layout->padding = padding;
+
+	close_w = sdl_menu_text_width(ui, "Close") + 24;
+	layout->close_rect = (SDL_Rect) {
+		panel_x + panel_w - padding - close_w,
+		panel_y + panel_h - padding - (text_h + 8),
+		close_w,
+		text_h + 8
+	};
+
+	x = panel_x + padding;
+	y = panel_y + padding;
+	y += row_h * 2;
+	y += row_h * 4;
+	y += row_h * 2;
+	y += row_h;
+
+	label_w = sdl_menu_text_width(ui, "Project page:");
+	layout->link_main_rect = (SDL_Rect) {
+		x + label_w + 8,
+		y,
+		sdl_menu_text_width(ui, url_main),
+		text_h
+	};
+	y += row_h;
+
+	label_w = sdl_menu_text_width(ui, "SDL rewrite:");
+	layout->link_sdl_rect = (SDL_Rect) {
+		x + label_w + 8,
+		y,
+		sdl_menu_text_width(ui, url_sdl),
+		text_h
+	};
+}
+
+static TilemSdlAboutItem sdl_about_hit_test(const TilemSdlAboutLayout *layout,
+                                            int x, int y)
+{
+	if (!sdl_point_in_rect(x, y, &layout->panel))
+		return SDL_ABOUT_ITEM_NONE;
+	if (sdl_point_in_rect(x, y, &layout->link_main_rect))
+		return SDL_ABOUT_ITEM_LINK_MAIN;
+	if (sdl_point_in_rect(x, y, &layout->link_sdl_rect))
+		return SDL_ABOUT_ITEM_LINK_SDL;
+	if (sdl_point_in_rect(x, y, &layout->close_rect))
+		return SDL_ABOUT_ITEM_CLOSE;
+	return SDL_ABOUT_ITEM_NONE;
+}
+
+static void sdl_about_open(TilemSdlUi *ui)
+{
+	if (!ui)
+		return;
+	ui->about_visible = TRUE;
+	ui->about_hover = SDL_ABOUT_ITEM_NONE;
+	sdl_menu_hide(ui);
+}
+
+static void sdl_about_close(TilemSdlUi *ui)
+{
+	if (!ui)
+		return;
+	ui->about_visible = FALSE;
+	ui->about_hover = SDL_ABOUT_ITEM_NONE;
+}
+
+static void sdl_about_open_url(const char *url)
+{
+	if (!url || !*url)
+		return;
+	SDL_OpenURL(url);
+}
+
+static gboolean sdl_about_handle_event(TilemSdlUi *ui,
+                                       const SDL_Event *event)
+{
+	TilemSdlAboutLayout layout;
+	TilemSdlAboutItem hit;
+
+	if (!ui || !ui->about_visible || !event)
+		return FALSE;
+
+	sdl_about_layout(ui, &layout);
+
+	switch (event->type) {
+	case SDL_MOUSEMOTION:
+		ui->about_hover = sdl_about_hit_test(
+			&layout, event->motion.x, event->motion.y);
+		return TRUE;
+	case SDL_MOUSEBUTTONDOWN:
+		if (event->button.button != SDL_BUTTON_LEFT) {
+			return TRUE;
+		}
+		if (!sdl_point_in_rect(event->button.x,
+		                       event->button.y,
+		                       &layout.panel)) {
+			sdl_about_close(ui);
+			return TRUE;
+		}
+		hit = sdl_about_hit_test(&layout,
+		                         event->button.x,
+		                         event->button.y);
+		switch (hit) {
+		case SDL_ABOUT_ITEM_LINK_MAIN:
+			sdl_about_open_url("http://lpg.ticalc.org/prj_tilem/");
+			break;
+		case SDL_ABOUT_ITEM_LINK_SDL:
+			sdl_about_open_url(
+				"https://github.com/siraben/"
+				"tilem-headless/commits/sdl-rewrite");
+			break;
+		case SDL_ABOUT_ITEM_CLOSE:
+			sdl_about_close(ui);
+			break;
+		default:
+			break;
+		}
+		return TRUE;
+	case SDL_KEYDOWN:
+		if (event->key.keysym.sym == SDLK_ESCAPE)
+			sdl_about_close(ui);
+		return TRUE;
+	default:
+		break;
+	}
+
+	return TRUE;
+}
+
+static void sdl_render_about(TilemSdlUi *ui)
+{
+	TilemSdlAboutLayout layout;
+	SDL_Color overlay = { 0, 0, 0, 150 };
+	SDL_Color panel = { 45, 45, 45, 240 };
+	SDL_Color border = { 90, 90, 90, 255 };
+	SDL_Color text = { 230, 230, 230, 255 };
+	SDL_Color dim = { 160, 160, 160, 255 };
+	SDL_Color link = { 120, 180, 240, 255 };
+	SDL_Color hover = { 150, 200, 255, 255 };
+	SDL_Color button_fill = { 70, 70, 70, 255 };
+	SDL_Color button_hover = { 90, 90, 90, 255 };
+	const char *url_main = "http://lpg.ticalc.org/prj_tilem/";
+	const char *url_sdl =
+		"https://github.com/siraben/tilem-headless/commits/sdl-rewrite";
+	int x;
+	int y;
+	int row_h;
+	int text_h;
+
+	if (!ui || !ui->about_visible)
+		return;
+
+	sdl_about_layout(ui, &layout);
+	text_h = layout.text_h;
+	row_h = text_h + 4;
+	x = layout.panel.x + layout.padding;
+	y = layout.panel.y + layout.padding;
+
+	SDL_SetRenderDrawBlendMode(ui->renderer, SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(ui->renderer, overlay.r, overlay.g,
+	                       overlay.b, overlay.a);
+	SDL_RenderFillRect(ui->renderer, NULL);
+
+	SDL_SetRenderDrawColor(ui->renderer, panel.r, panel.g,
+	                       panel.b, panel.a);
+	SDL_RenderFillRect(ui->renderer, &layout.panel);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &layout.panel);
+
+	sdl_draw_text_menu(ui, x, y, "TilEm II " PACKAGE_VERSION, text);
+	y += row_h * 2;
+	sdl_draw_text_menu(ui, x, y, "TilEm is a TI Linux Emulator.", text);
+	y += row_h;
+	sdl_draw_text_menu(ui, x, y, "It emulates all current Z80 models:", text);
+	y += row_h;
+	sdl_draw_text_menu(ui, x, y,
+	                   "TI73, TI76, TI81, TI82, TI83(+)(SE),",
+	                   text);
+	y += row_h;
+	sdl_draw_text_menu(ui, x, y, "TI84+(SE), TI85 and TI86.", text);
+	y += row_h * 2;
+	sdl_draw_text_menu(ui, x, y, "SDL build", dim);
+	y += row_h;
+
+	sdl_draw_text_menu(ui, x, y, "Project page:", text);
+	sdl_draw_text_menu(ui, layout.link_main_rect.x,
+	                   layout.link_main_rect.y,
+	                   url_main,
+	                   ui->about_hover == SDL_ABOUT_ITEM_LINK_MAIN
+	                       ? hover : link);
+	SDL_RenderDrawLine(ui->renderer,
+	                   layout.link_main_rect.x,
+	                   layout.link_main_rect.y + text_h,
+	                   layout.link_main_rect.x + layout.link_main_rect.w,
+	                   layout.link_main_rect.y + text_h);
+	y += row_h;
+
+	sdl_draw_text_menu(ui, x, y, "SDL rewrite:", text);
+	sdl_draw_text_menu(ui, layout.link_sdl_rect.x,
+	                   layout.link_sdl_rect.y,
+	                   url_sdl,
+	                   ui->about_hover == SDL_ABOUT_ITEM_LINK_SDL
+	                       ? hover : link);
+	SDL_RenderDrawLine(ui->renderer,
+	                   layout.link_sdl_rect.x,
+	                   layout.link_sdl_rect.y + text_h,
+	                   layout.link_sdl_rect.x + layout.link_sdl_rect.w,
+	                   layout.link_sdl_rect.y + text_h);
+
+	SDL_SetRenderDrawColor(ui->renderer,
+	                       ui->about_hover == SDL_ABOUT_ITEM_CLOSE
+	                           ? button_hover.r
+	                           : button_fill.r,
+	                       ui->about_hover == SDL_ABOUT_ITEM_CLOSE
+	                           ? button_hover.g
+	                           : button_fill.g,
+	                       ui->about_hover == SDL_ABOUT_ITEM_CLOSE
+	                           ? button_hover.b
+	                           : button_fill.b,
+	                       255);
+	SDL_RenderFillRect(ui->renderer, &layout.close_rect);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &layout.close_rect);
+	sdl_draw_text_menu(ui,
+	                   layout.close_rect.x + 12,
+	                   layout.close_rect.y
+	                       + (layout.close_rect.h - text_h) / 2,
+	                   "Close",
+	                   text);
+
+	SDL_SetRenderDrawBlendMode(ui->renderer, SDL_BLENDMODE_NONE);
 }
 
 static void sdl_preferences_set_limit_speed(TilemSdlUi *ui, gboolean limit)
@@ -5846,6 +6132,7 @@ static void sdl_render(TilemSdlUi *ui)
 	sdl_render_slot_dialog(ui);
 	sdl_render_receive_dialog(ui);
 	sdl_render_screenshot_dialog(ui);
+	sdl_render_about(ui);
 	SDL_RenderPresent(ui->renderer);
 }
 
@@ -6845,22 +7132,7 @@ static void sdl_handle_preferences(TilemSdlUi *ui)
 
 static void sdl_handle_about(TilemSdlUi *ui)
 {
-	const char *title = "TilEm II";
-	char *body = g_strdup_printf(
-		"TilEm II %s\n"
-		"\n"
-		"TilEm is a TI Linux Emulator.\n"
-		"It emulates all current Z80 models:\n"
-		"TI73, TI76, TI81, TI82, TI83(+)(SE),\n"
-		"TI84+(SE), TI85 and TI86.\n"
-		"\n"
-		"http://lpg.ticalc.org/prj_tilem/",
-		PACKAGE_VERSION);
-
-	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION,
-	                         title, body,
-	                         ui ? ui->window : NULL);
-	g_free(body);
+	sdl_about_open(ui);
 }
 
 static void sdl_handle_menu_action(TilemSdlUi *ui, TilemSdlMenuAction action,
@@ -7213,6 +7485,9 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 			if (ui.debugger
 			    && tilem_sdl_debugger_handle_event(
 			           ui.debugger, &event))
+				continue;
+			if (ui.about_visible
+			    && sdl_about_handle_event(&ui, &event))
 				continue;
 			if (ui.screenshot_dialog.visible
 			    && sdl_screenshot_dialog_handle_event(&ui, &event))
