@@ -109,47 +109,71 @@ void tilem_macro_print(TilemMacro *macro) {
 	}
 }
 
+static void tilem_macro_write_file_internal(TilemCalcEmulator *emu,
+                                            const char *filename)
+{
+	FILE *fp;
+	char *dir;
+	int i;
+
+	if (!emu || !emu->macro || !filename)
+		return;
+
+	fp = g_fopen(filename, "w");
+	if (!fp)
+		return;
+
+	for (i = 0; i < emu->macro->n; i++ ) {
+		printf("type : %d    value : %s\n",
+		       emu->macro->actions[i]->type,
+		       emu->macro->actions[i]->value);
+		/* Test if it's a key press or a file loading action */
+		if (emu->macro->actions[i]->type == 1) {
+			char *lengthchar = g_new0(char, 5);
+			int length = strlen(emu->macro->actions[i]->value);
+			fwrite("file=", 1, 5, fp);
+			sprintf(lengthchar, "%04d", length);
+			fwrite(lengthchar, 1, 4, fp);
+			fwrite("-", 1, 1, fp);
+			fwrite(emu->macro->actions[i]->value, 1, length, fp);
+			g_free(lengthchar);
+		} else {
+			fwrite(emu->macro->actions[i]->value, 1, 4, fp);
+			fwrite(",", 1, 1, fp);
+		}
+	}
+
+	fclose(fp);
+
+	dir = g_path_get_dirname(filename);
+	tilem_config_set("macro", "directory/f", dir, NULL);
+	g_free(dir);
+}
+
 /* Write a file using TilemMacro structure */
 void tilem_macro_write_file(TilemCalcEmulator *emu) {
 	char *dir, *filename;
 	tilem_config_get("macro",
-                 "directory/f", &dir,
-                 NULL);
+	                 "directory/f", &dir,
+	                 NULL);
 
-	filename = prompt_save_file("Save macro", 
-				    GTK_WINDOW(emu->ewin->window),
-				    NULL, 
-				    dir,
-				    "Macro files", "*.txt",
-                                    "All files", "*",
-				    NULL);
-	if(filename) {
-		FILE * fp = g_fopen(filename, "w");
-		if(fp) {
-			int i = 0;
-			for(i = 0; i< emu->macro->n; i++ ){
-				printf("type : %d    value : %s\n", emu->macro->actions[i]->type, emu->macro->actions[i]->value);
-				/* Test if it's a key press or a file loading action */
-				if(emu->macro->actions[i]->type == 1) {
-					char * lengthchar = g_new0(char, 4);
-					int length = strlen(emu->macro->actions[i]->value);
-					fwrite("file=", 1, 5, fp);
-					sprintf(lengthchar, "%04d", strlen(emu->macro->actions[i]->value));
-					fwrite(lengthchar, 1, sizeof(int), fp);
-					fwrite("-", 1, 1, fp);
-					fwrite(emu->macro->actions[i]->value, 1, length, fp);
-					g_free(lengthchar);
-				} else {
-					fwrite(emu->macro->actions[i]->value, 1, 4, fp);
-					fwrite(",", 1, 1, fp);
-				}
-			}
-			tilem_config_set("macro", "directory/f", g_path_get_dirname(filename), NULL);
-			fclose(fp);
-		}
+	filename = prompt_save_file("Save macro",
+	                            GTK_WINDOW(emu->ewin->window),
+	                            NULL,
+	                            dir,
+	                            "Macro files", "*.txt",
+	                            "All files", "*",
+	                            NULL);
+	if (filename) {
+		tilem_macro_write_file_internal(emu, filename);
 		g_free(filename);
-		g_free(dir);
 	}
+	g_free(dir);
+}
+
+void tilem_macro_write_file_to(TilemCalcEmulator *emu, const char *filename)
+{
+	tilem_macro_write_file_internal(emu, filename);
 }
 
 #define MACRO_KEYPRESS 0

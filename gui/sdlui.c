@@ -86,6 +86,12 @@ typedef struct {
 	int menu_width;
 	int menu_height;
 	int menu_selected;
+	gboolean submenu_visible;
+	int submenu_x;
+	int submenu_y;
+	int submenu_width;
+	int submenu_height;
+	int submenu_selected;
 	TTF_Font *menu_font;
 	gboolean ttf_ready;
 	int keypress_keycodes[64];
@@ -100,6 +106,12 @@ typedef enum {
 	SDL_MENU_SAVE_CALC,
 	SDL_MENU_REVERT_CALC,
 	SDL_MENU_RESET,
+	SDL_MENU_MACRO_MENU,
+	SDL_MENU_MACRO_BEGIN,
+	SDL_MENU_MACRO_END,
+	SDL_MENU_MACRO_PLAY,
+	SDL_MENU_MACRO_OPEN,
+	SDL_MENU_MACRO_SAVE,
 	SDL_MENU_SCREENSHOT,
 	SDL_MENU_QUICK_SCREENSHOT,
 	SDL_MENU_PREFERENCES,
@@ -122,6 +134,7 @@ static const TilemSdlMenuItem sdl_menu_items[] = {
 	{ "Revert Calculator State", SDL_MENU_REVERT_CALC, FALSE },
 	{ "Reset Calculator", SDL_MENU_RESET, FALSE },
 	{ NULL, SDL_MENU_NONE, TRUE },
+	{ "Macro >", SDL_MENU_MACRO_MENU, FALSE },
 	{ "Screenshot...", SDL_MENU_SCREENSHOT, FALSE },
 	{ "Quick Screenshot", SDL_MENU_QUICK_SCREENSHOT, FALSE },
 	{ NULL, SDL_MENU_NONE, TRUE },
@@ -129,6 +142,15 @@ static const TilemSdlMenuItem sdl_menu_items[] = {
 	{ NULL, SDL_MENU_NONE, TRUE },
 	{ "About", SDL_MENU_ABOUT, FALSE },
 	{ "Quit", SDL_MENU_QUIT, FALSE }
+};
+
+static const TilemSdlMenuItem sdl_menu_macro_items[] = {
+	{ "Begin Recording", SDL_MENU_MACRO_BEGIN, FALSE },
+	{ "End Recording", SDL_MENU_MACRO_END, FALSE },
+	{ "Play Macro", SDL_MENU_MACRO_PLAY, FALSE },
+	{ NULL, SDL_MENU_NONE, TRUE },
+	{ "Open Macro...", SDL_MENU_MACRO_OPEN, FALSE },
+	{ "Save Macro...", SDL_MENU_MACRO_SAVE, FALSE }
 };
 
 #define SDL_SCREENSHOT_DEFAULT_WIDTH_96 192
@@ -1321,26 +1343,78 @@ static void sdl_draw_text_menu(TilemSdlUi *ui, int x, int y,
 	sdl_draw_text(ui->renderer, x, y, SDL_MENU_FONT_SCALE, text, color);
 }
 
-static void sdl_menu_show(TilemSdlUi *ui, int x, int y)
+static void sdl_menu_calc_size(TilemSdlUi *ui,
+                               const TilemSdlMenuItem *items,
+                               size_t n_items,
+                               int *out_w,
+                               int *out_h)
 {
 	size_t i;
 	int maxw = 0;
 	int item_h = sdl_menu_item_height(ui);
 	int text_w;
-	int menu_w;
-	int menu_h;
 
-	for (i = 0; i < G_N_ELEMENTS(sdl_menu_items); i++) {
-		if (sdl_menu_items[i].separator)
+	for (i = 0; i < n_items; i++) {
+		if (items[i].separator)
 			continue;
-		text_w = sdl_menu_text_width(ui, sdl_menu_items[i].label);
+		text_w = sdl_menu_text_width(ui, items[i].label);
 		if (text_w > maxw)
 			maxw = text_w;
 	}
 
-	menu_w = maxw + SDL_MENU_PADDING * 2;
-	menu_h = (int) G_N_ELEMENTS(sdl_menu_items) * item_h
-		+ SDL_MENU_SPACING * 2;
+	if (out_w)
+		*out_w = maxw + SDL_MENU_PADDING * 2;
+	if (out_h)
+		*out_h = (int) n_items * item_h + SDL_MENU_SPACING * 2;
+}
+
+static gboolean sdl_menu_contains(int x, int y,
+                                  int menu_x, int menu_y,
+                                  int menu_w, int menu_h)
+{
+	if (x < menu_x || y < menu_y)
+		return FALSE;
+	if (x >= menu_x + menu_w || y >= menu_y + menu_h)
+		return FALSE;
+	return TRUE;
+}
+
+static int sdl_menu_hit_test_items(TilemSdlUi *ui,
+                                   const TilemSdlMenuItem *items,
+                                   size_t n_items,
+                                   int menu_x, int menu_y,
+                                   int menu_w, int menu_h,
+                                   int x, int y)
+{
+	int rel_y;
+	int item_h;
+	int index;
+
+	if (!sdl_menu_contains(x, y, menu_x, menu_y, menu_w, menu_h))
+		return -1;
+
+	item_h = sdl_menu_item_height(ui);
+	rel_y = y - menu_y - SDL_MENU_SPACING;
+	if (rel_y < 0)
+		return -1;
+
+	index = rel_y / item_h;
+	if (index < 0 || index >= (int) n_items)
+		return -1;
+
+	if (items[index].separator)
+		return -1;
+
+	return index;
+}
+
+static void sdl_menu_show(TilemSdlUi *ui, int x, int y)
+{
+	int menu_w;
+	int menu_h;
+
+	sdl_menu_calc_size(ui, sdl_menu_items, G_N_ELEMENTS(sdl_menu_items),
+	                   &menu_w, &menu_h);
 
 	if (x + menu_w > ui->window_width)
 		x = MAX(ui->window_width - menu_w, 0);
@@ -1353,45 +1427,60 @@ static void sdl_menu_show(TilemSdlUi *ui, int x, int y)
 	ui->menu_width = menu_w;
 	ui->menu_height = menu_h;
 	ui->menu_selected = -1;
+	ui->submenu_visible = FALSE;
+	ui->submenu_selected = -1;
+}
+
+static void sdl_menu_show_macro(TilemSdlUi *ui, int index)
+{
+	int item_h = sdl_menu_item_height(ui);
+	int menu_w;
+	int menu_h;
+	int x = ui->menu_x + ui->menu_width;
+	int y = ui->menu_y + item_h * index;
+
+	sdl_menu_calc_size(ui, sdl_menu_macro_items,
+	                   G_N_ELEMENTS(sdl_menu_macro_items),
+	                   &menu_w, &menu_h);
+
+	if (x + menu_w > ui->window_width)
+		x = MAX(ui->menu_x - menu_w, 0);
+	if (y + menu_h > ui->window_height)
+		y = MAX(ui->window_height - menu_h, 0);
+
+	ui->submenu_visible = TRUE;
+	ui->submenu_x = x;
+	ui->submenu_y = y;
+	ui->submenu_width = menu_w;
+	ui->submenu_height = menu_h;
+	ui->submenu_selected = -1;
 }
 
 static void sdl_menu_hide(TilemSdlUi *ui)
 {
 	ui->menu_visible = FALSE;
 	ui->menu_selected = -1;
+	ui->submenu_visible = FALSE;
+	ui->submenu_selected = -1;
 }
 
 static int sdl_menu_hit_test(TilemSdlUi *ui, int x, int y)
 {
-	int rel_y;
-	int item_h;
-	int index;
-
 	if (!ui->menu_visible)
 		return -1;
-
-	if (x < ui->menu_x || y < ui->menu_y)
-		return -1;
-	if (x >= ui->menu_x + ui->menu_width
-	    || y >= ui->menu_y + ui->menu_height)
-		return -1;
-
-	item_h = sdl_menu_item_height(ui);
-	rel_y = y - ui->menu_y - SDL_MENU_SPACING;
-	if (rel_y < 0)
-		return -1;
-
-	index = rel_y / item_h;
-	if (index < 0 || index >= (int) G_N_ELEMENTS(sdl_menu_items))
-		return -1;
-
-	if (sdl_menu_items[index].separator)
-		return -1;
-
-	return index;
+	return sdl_menu_hit_test_items(ui, sdl_menu_items,
+	                               G_N_ELEMENTS(sdl_menu_items),
+	                               ui->menu_x, ui->menu_y,
+	                               ui->menu_width, ui->menu_height,
+	                               x, y);
 }
 
-static void sdl_render_menu(TilemSdlUi *ui)
+static void sdl_render_menu_panel(TilemSdlUi *ui,
+                                  const TilemSdlMenuItem *items,
+                                  size_t n_items,
+                                  int menu_x, int menu_y,
+                                  int menu_w, int menu_h,
+                                  int selected)
 {
 	SDL_Rect menu_rect;
 	SDL_Rect item_rect;
@@ -1402,14 +1491,11 @@ static void sdl_render_menu(TilemSdlUi *ui)
 	SDL_Color bg_color = { 40, 40, 40, 240 };
 	SDL_Color border_color = { 90, 90, 90, 255 };
 
-	if (!ui->menu_visible)
-		return;
-
 	item_h = sdl_menu_item_height(ui);
-	menu_rect.x = ui->menu_x;
-	menu_rect.y = ui->menu_y;
-	menu_rect.w = ui->menu_width;
-	menu_rect.h = ui->menu_height;
+	menu_rect.x = menu_x;
+	menu_rect.y = menu_y;
+	menu_rect.w = menu_w;
+	menu_rect.h = menu_h;
 
 	SDL_SetRenderDrawColor(ui->renderer, bg_color.r, bg_color.g,
 	                       bg_color.b, bg_color.a);
@@ -1419,14 +1505,14 @@ static void sdl_render_menu(TilemSdlUi *ui)
 	                       border_color.b, border_color.a);
 	SDL_RenderDrawRect(ui->renderer, &menu_rect);
 
-	for (i = 0; i < G_N_ELEMENTS(sdl_menu_items); i++) {
-		item_rect.x = ui->menu_x;
-		item_rect.y = ui->menu_y + SDL_MENU_SPACING
+	for (i = 0; i < n_items; i++) {
+		item_rect.x = menu_x;
+		item_rect.y = menu_y + SDL_MENU_SPACING
 			+ (int) i * item_h;
-		item_rect.w = ui->menu_width;
+		item_rect.w = menu_w;
 		item_rect.h = item_h;
 
-		if (sdl_menu_items[i].separator) {
+		if (items[i].separator) {
 			SDL_SetRenderDrawColor(ui->renderer, border_color.r,
 			                       border_color.g,
 			                       border_color.b,
@@ -1439,7 +1525,7 @@ static void sdl_render_menu(TilemSdlUi *ui)
 			continue;
 		}
 
-		if ((int) i == ui->menu_selected) {
+		if ((int) i == selected) {
 			SDL_SetRenderDrawColor(ui->renderer, highlight_color.r,
 			                       highlight_color.g,
 			                       highlight_color.b,
@@ -1450,8 +1536,28 @@ static void sdl_render_menu(TilemSdlUi *ui)
 		sdl_draw_text_menu(ui,
 		                   item_rect.x + SDL_MENU_PADDING,
 		                   item_rect.y + SDL_MENU_PADDING,
-		                   sdl_menu_items[i].label,
+		                   items[i].label,
 		                   text_color);
+	}
+}
+
+static void sdl_render_menu(TilemSdlUi *ui)
+{
+	if (!ui->menu_visible)
+		return;
+
+	sdl_render_menu_panel(ui, sdl_menu_items,
+	                      G_N_ELEMENTS(sdl_menu_items),
+	                      ui->menu_x, ui->menu_y,
+	                      ui->menu_width, ui->menu_height,
+	                      ui->menu_selected);
+
+	if (ui->submenu_visible) {
+		sdl_render_menu_panel(ui, sdl_menu_macro_items,
+		                      G_N_ELEMENTS(sdl_menu_macro_items),
+		                      ui->submenu_x, ui->submenu_y,
+		                      ui->submenu_width, ui->submenu_height,
+		                      ui->submenu_selected);
 	}
 }
 
@@ -1846,6 +1952,51 @@ static char *sdl_pick_screenshot_file(TilemSdlUi *ui)
 		dir = g_path_get_dirname(filename);
 		tilem_config_set("screenshot", "directory/f", dir, NULL);
 		g_free(dir);
+	}
+
+	return filename;
+}
+
+static char *sdl_pick_macro_file(TilemSdlUi *ui)
+{
+	char *dir = NULL;
+	char *filename;
+	gboolean used_native = FALSE;
+
+	tilem_config_get("macro", "directory/f", &dir, NULL);
+	if (!dir)
+		dir = g_get_current_dir();
+
+	filename = sdl_native_file_dialog("Open Macro", dir, NULL,
+	                                  FALSE, &used_native);
+	g_free(dir);
+
+	if (!filename && !used_native) {
+		sdl_show_message(ui, "Macro",
+		                 "No native file picker available.");
+	}
+
+	return filename;
+}
+
+static char *sdl_pick_macro_save_file(TilemSdlUi *ui)
+{
+	char *dir = NULL;
+	char *filename;
+	gboolean used_native = FALSE;
+
+	tilem_config_get("macro", "directory/f", &dir, NULL);
+	if (!dir)
+		dir = g_get_current_dir();
+
+	filename = sdl_native_file_dialog("Save Macro", dir,
+	                                  "macro.txt", TRUE,
+	                                  &used_native);
+	g_free(dir);
+
+	if (!filename && !used_native) {
+		sdl_show_message(ui, "Macro",
+		                 "No native file picker available.");
 	}
 
 	return filename;
@@ -2268,6 +2419,43 @@ static void sdl_handle_revert_calc(TilemSdlUi *ui)
 		sdl_report_error("Unable to load calculator state", err);
 }
 
+static void sdl_handle_macro_begin(TilemSdlUi *ui)
+{
+	tilem_macro_start(ui->emu);
+}
+
+static void sdl_handle_macro_end(TilemSdlUi *ui)
+{
+	tilem_macro_stop(ui->emu);
+}
+
+static void sdl_handle_macro_play(TilemSdlUi *ui)
+{
+	tilem_macro_play(ui->emu);
+}
+
+static void sdl_handle_macro_open(TilemSdlUi *ui)
+{
+	char *filename = sdl_pick_macro_file(ui);
+
+	if (!filename)
+		return;
+
+	tilem_macro_load(ui->emu, filename);
+	g_free(filename);
+}
+
+static void sdl_handle_macro_save(TilemSdlUi *ui)
+{
+	char *filename = sdl_pick_macro_save_file(ui);
+
+	if (!filename)
+		return;
+
+	tilem_macro_write_file_to(ui->emu, filename);
+	g_free(filename);
+}
+
 static void sdl_handle_screenshot(TilemSdlUi *ui)
 {
 	GError *err = NULL;
@@ -2421,6 +2609,21 @@ static void sdl_handle_menu_action(TilemSdlUi *ui, TilemSdlMenuAction action,
 		break;
 	case SDL_MENU_RESET:
 		tilem_calc_emulator_reset(ui->emu);
+		break;
+	case SDL_MENU_MACRO_BEGIN:
+		sdl_handle_macro_begin(ui);
+		break;
+	case SDL_MENU_MACRO_END:
+		sdl_handle_macro_end(ui);
+		break;
+	case SDL_MENU_MACRO_PLAY:
+		sdl_handle_macro_play(ui);
+		break;
+	case SDL_MENU_MACRO_OPEN:
+		sdl_handle_macro_open(ui);
+		break;
+	case SDL_MENU_MACRO_SAVE:
+		sdl_handle_macro_save(ui);
 		break;
 	case SDL_MENU_SCREENSHOT:
 		sdl_handle_screenshot(ui);
@@ -2645,16 +2848,53 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 
 				if (event.button.button == SDL_BUTTON_LEFT) {
 					if (ui.menu_visible) {
-						int idx = sdl_menu_hit_test(&ui,
-						                            event.button.x,
-						                            event.button.y);
-						if (idx >= 0) {
-							sdl_handle_menu_action(
+						int sub_idx = -1;
+						int idx = -1;
+						gboolean hide_menu = TRUE;
+
+						if (ui.submenu_visible) {
+							sub_idx = sdl_menu_hit_test_items(
 								&ui,
-								sdl_menu_items[idx].action,
-								&running);
+								sdl_menu_macro_items,
+								G_N_ELEMENTS(sdl_menu_macro_items),
+								ui.submenu_x,
+								ui.submenu_y,
+								ui.submenu_width,
+								ui.submenu_height,
+								event.button.x,
+								event.button.y);
+							if (sub_idx >= 0) {
+								sdl_handle_menu_action(
+									&ui,
+									sdl_menu_macro_items[sub_idx].action,
+									&running);
+							}
 						}
-						sdl_menu_hide(&ui);
+
+						if (sub_idx >= 0) {
+							sdl_menu_hide(&ui);
+							break;
+						}
+
+						idx = sdl_menu_hit_test(&ui,
+						                        event.button.x,
+						                        event.button.y);
+						if (idx >= 0) {
+							if (sdl_menu_items[idx].action
+							    == SDL_MENU_MACRO_MENU) {
+								sdl_menu_show_macro(&ui, idx);
+								ui.menu_selected = idx;
+								hide_menu = FALSE;
+							} else {
+								sdl_handle_menu_action(
+									&ui,
+									sdl_menu_items[idx].action,
+									&running);
+							}
+						}
+
+						if (hide_menu)
+							sdl_menu_hide(&ui);
 						break;
 					}
 
@@ -2671,9 +2911,56 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 				break;
 			case SDL_MOUSEMOTION:
 				if (ui.menu_visible) {
-					ui.menu_selected = sdl_menu_hit_test(&ui,
-					                                     event.motion.x,
-					                                     event.motion.y);
+					int main_idx;
+					int sub_idx = -1;
+					gboolean over_submenu = FALSE;
+
+					main_idx = sdl_menu_hit_test(&ui,
+					                             event.motion.x,
+					                             event.motion.y);
+					if (ui.submenu_visible) {
+						over_submenu = sdl_menu_contains(
+							event.motion.x,
+							event.motion.y,
+							ui.submenu_x,
+							ui.submenu_y,
+							ui.submenu_width,
+							ui.submenu_height);
+						sub_idx = sdl_menu_hit_test_items(
+							&ui,
+							sdl_menu_macro_items,
+							G_N_ELEMENTS(sdl_menu_macro_items),
+							ui.submenu_x,
+							ui.submenu_y,
+							ui.submenu_width,
+							ui.submenu_height,
+							event.motion.x,
+							event.motion.y);
+					}
+
+					if (main_idx >= 0) {
+						ui.menu_selected = main_idx;
+					} else if (!over_submenu) {
+						ui.menu_selected = -1;
+					}
+
+					if (over_submenu) {
+						if (sub_idx >= 0)
+							ui.submenu_selected = sub_idx;
+						else
+							ui.submenu_selected = -1;
+					} else {
+						ui.submenu_selected = -1;
+					}
+
+					if (main_idx >= 0
+					    && sdl_menu_items[main_idx].action
+					    == SDL_MENU_MACRO_MENU) {
+						sdl_menu_show_macro(&ui, main_idx);
+					} else if (!over_submenu) {
+						ui.submenu_visible = FALSE;
+						ui.submenu_selected = -1;
+					}
 					break;
 				}
 

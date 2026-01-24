@@ -258,6 +258,9 @@ void tilem_macro_print(TilemMacro *macro);
 /* Write a macro file */
 void tilem_macro_write_file(TilemCalcEmulator *emu);
 
+/* Write a macro file to a specific filename */
+void tilem_macro_write_file_to(TilemCalcEmulator *emu, const char *filename);
+
 
 /* Play a macro (loaded or recorded before) */
 void tilem_macro_play(TilemCalcEmulator *emu);
