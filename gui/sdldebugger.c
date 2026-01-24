@@ -75,11 +75,49 @@ enum {
 	SDL_DBG_BP_EXEC = 1
 };
 
+enum {
+	R_AF,
+	R_BC,
+	R_DE,
+	R_HL,
+	R_IX,
+	R_SP,
+	R_AF2,
+	R_BC2,
+	R_DE2,
+	R_HL2,
+	R_IY,
+	R_PC,
+	R_IM,
+	R_I,
+	NUM_REGS
+};
+
+static const char *const sdl_dbg_reg_labels[] = {
+	"AF:", "BC:", "DE:", "HL:", "IX:", "SP:",
+	"AF':", "BC':", "DE':", "HL':", "IY:", "PC:",
+	"IM:", "I:"
+};
+
+static const char sdl_dbg_flag_labels[][2] = {
+	"C", "N", "P", "X", "H", "Y", "Z", "S"
+};
+
+static const int sdl_dbg_reg_left_map[] = {
+	R_AF, R_BC, R_DE, R_HL, R_IX, R_SP
+};
+
+static const int sdl_dbg_reg_right_map[] = {
+	R_AF2, R_BC2, R_DE2, R_HL2, R_IY, R_PC
+};
+
 typedef enum {
 	SDL_DBG_INPUT_NONE,
 	SDL_DBG_INPUT_GOTO,
 	SDL_DBG_INPUT_BP_ADD,
-	SDL_DBG_INPUT_BP_EDIT
+	SDL_DBG_INPUT_BP_EDIT,
+	SDL_DBG_INPUT_REG,
+	SDL_DBG_INPUT_MEM
 } TilemSdlInputMode;
 
 typedef enum {
@@ -161,6 +199,14 @@ typedef struct {
 	int toolbar_icon_h;
 } TilemSdlDebuggerLayout;
 
+typedef struct {
+	SDL_Rect reg_rects[NUM_REGS];
+	SDL_Rect flag_rects[8];
+	SDL_Rect iff_rect;
+	gboolean has_flags;
+	gboolean has_im;
+} TilemSdlDbgRegLayout;
+
 struct _TilemSdlDebugger {
 	TilemCalcEmulator *emu;
 	SDL_Window *window;
@@ -194,12 +240,19 @@ struct _TilemSdlDebugger {
 	int input_len;
 	char input_error[SDL_DEBUGGER_INPUT_MAX];
 	int input_bp_index;
+	int input_reg_index;
+	dword input_mem_addr;
+	gboolean input_mem_logical;
 	TilemSdlKeypad keypad;
 	TilemSdlIcons *icons;
 	gboolean menu_open;
 	TilemSdlMenuBar menu_active;
 	int menu_selected;
 	SDL_Rect menu_bar_items[SDL_DBG_MENU_BAR_COUNT];
+	gboolean context_menu_open;
+	int context_menu_selected;
+	SDL_Rect context_menu_rect;
+	dword context_menu_addr;
 };
 
 static const char * const sdl_dbg_menu_bar_labels[] = {
@@ -239,11 +292,39 @@ static const TilemSdlDbgMenuItem sdl_dbg_menu_go_items[] = {
 	{ "Next Stack Entry", SDL_DBG_MENU_ACTION_NEXT_STACK, FALSE, 0 }
 };
 
+typedef enum {
+	SDL_DBG_CTX_BREAKPOINT,
+	SDL_DBG_CTX_GO_ADDRESS,
+	SDL_DBG_CTX_GO_PC
+} TilemSdlDbgContextAction;
+
+typedef struct {
+	const char *label;
+	TilemSdlDbgContextAction action;
+	gboolean separator;
+} TilemSdlDbgContextItem;
+
+static const TilemSdlDbgContextItem sdl_dbg_context_items[] = {
+	{ "Breakpoint Here", SDL_DBG_CTX_BREAKPOINT, FALSE },
+	{ NULL, SDL_DBG_CTX_BREAKPOINT, TRUE },
+	{ "Go to Address...", SDL_DBG_CTX_GO_ADDRESS, FALSE },
+	{ "Go to PC", SDL_DBG_CTX_GO_PC, FALSE }
+};
+
 static void sdl_dbg_start_input(TilemSdlDebugger *dbg,
                                 TilemSdlInputMode mode,
                                 const char *prefill);
 static void sdl_dbg_toggle_breakpoints_dialog(TilemSdlDebugger *dbg);
 static void sdl_dbg_cancel_step_bp(TilemSdlDebugger *dbg);
+static void sdl_dbg_context_menu_close(TilemSdlDebugger *dbg);
+static void sdl_dbg_context_menu_open(TilemSdlDebugger *dbg,
+                                      int x, int y,
+                                      dword addr);
+static int sdl_dbg_context_menu_hit_test(TilemSdlDebugger *dbg,
+                                         int x, int y);
+static void sdl_dbg_context_menu_activate(TilemSdlDebugger *dbg,
+                                          TilemSdlDbgContextAction action);
+static void sdl_dbg_render_context_menu(TilemSdlDebugger *dbg);
 static void sdl_dbg_set_mem_mode(TilemSdlDebugger *dbg, gboolean logical);
 static void sdl_dbg_go_to_pc(TilemSdlDebugger *dbg);
 static void sdl_dbg_go_to_stack_pos(TilemSdlDebugger *dbg, int pos);
@@ -1157,6 +1238,25 @@ static byte sdl_dbg_read_mem_byte_physical(TilemCalc *calc, dword addr)
 	return calc->mem[addr];
 }
 
+static void sdl_dbg_write_mem_byte(TilemCalc *calc, dword addr, byte value)
+{
+	dword phys;
+
+	phys = (*calc->hw.mem_ltop)(calc, addr & 0xffff);
+	calc->mem[phys] = value;
+}
+
+static void sdl_dbg_write_mem_byte_physical(TilemCalc *calc,
+                                            dword addr,
+                                            byte value)
+{
+	dword limit = calc->hw.romsize + calc->hw.ramsize;
+
+	if (addr >= limit)
+		return;
+	calc->mem[addr] = value;
+}
+
 static dword sdl_dbg_read_mem_word_physical(TilemCalc *calc, dword addr)
 {
 	dword lo = sdl_dbg_read_mem_byte_physical(calc, addr);
@@ -1238,6 +1338,320 @@ static gboolean sdl_dbg_parse_physical(TilemSdlDebugger *dbg, const char *s,
 
 	*out = addr;
 	return TRUE;
+}
+
+static int sdl_dbg_reg_value_chars(int reg_index)
+{
+	switch (reg_index) {
+	case R_I:
+		return 2;
+	case R_IM:
+		return 1;
+	default:
+		return 4;
+	}
+}
+
+static dword sdl_dbg_reg_value(const TilemZ80Regs *regs, int reg_index)
+{
+	switch (reg_index) {
+	case R_AF:
+		return regs->af.w.l;
+	case R_BC:
+		return regs->bc.w.l;
+	case R_DE:
+		return regs->de.w.l;
+	case R_HL:
+		return regs->hl.w.l;
+	case R_IX:
+		return regs->ix.w.l;
+	case R_SP:
+		return regs->sp.w.l;
+	case R_AF2:
+		return regs->af2.w.l;
+	case R_BC2:
+		return regs->bc2.w.l;
+	case R_DE2:
+		return regs->de2.w.l;
+	case R_HL2:
+		return regs->hl2.w.l;
+	case R_IY:
+		return regs->iy.w.l;
+	case R_PC:
+		return regs->pc.w.l;
+	case R_IM:
+		return regs->im;
+	case R_I:
+		return regs->ir.b.h;
+	default:
+		return 0;
+	}
+}
+
+static void sdl_dbg_set_reg_value(TilemSdlDebugger *dbg,
+                                  int reg_index,
+                                  dword value)
+{
+	TilemCalc *calc;
+
+	if (!dbg || !dbg->emu || !dbg->emu->calc)
+		return;
+	calc = dbg->emu->calc;
+
+	tilem_calc_emulator_lock(dbg->emu);
+	switch (reg_index) {
+	case R_AF:
+		calc->z80.r.af.w.l = value;
+		break;
+	case R_BC:
+		calc->z80.r.bc.w.l = value;
+		break;
+	case R_DE:
+		calc->z80.r.de.w.l = value;
+		break;
+	case R_HL:
+		calc->z80.r.hl.w.l = value;
+		break;
+	case R_IX:
+		calc->z80.r.ix.w.l = value;
+		break;
+	case R_SP:
+		calc->z80.r.sp.w.l = value;
+		break;
+	case R_AF2:
+		calc->z80.r.af2.w.l = value;
+		break;
+	case R_BC2:
+		calc->z80.r.bc2.w.l = value;
+		break;
+	case R_DE2:
+		calc->z80.r.de2.w.l = value;
+		break;
+	case R_HL2:
+		calc->z80.r.hl2.w.l = value;
+		break;
+	case R_IY:
+		calc->z80.r.iy.w.l = value;
+		break;
+	case R_PC:
+		calc->z80.r.pc.w.l = value;
+		break;
+	case R_I:
+		calc->z80.r.ir.b.h = (byte) (value & 0xff);
+		break;
+	case R_IM:
+		if (value <= 2)
+			calc->z80.r.im = (byte) value;
+		break;
+	default:
+		break;
+	}
+	tilem_calc_emulator_unlock(dbg->emu);
+}
+
+static void sdl_dbg_toggle_flag(TilemSdlDebugger *dbg, int flag_index)
+{
+	TilemCalc *calc;
+
+	if (!dbg || !dbg->emu || !dbg->emu->calc)
+		return;
+	if (flag_index < 0 || flag_index > 7)
+		return;
+
+	calc = dbg->emu->calc;
+	tilem_calc_emulator_lock(dbg->emu);
+	if (calc->z80.r.af.d & (1 << flag_index))
+		calc->z80.r.af.d &= ~(1 << flag_index);
+	else
+		calc->z80.r.af.d |= (1 << flag_index);
+	tilem_calc_emulator_unlock(dbg->emu);
+}
+
+static void sdl_dbg_toggle_iff(TilemSdlDebugger *dbg)
+{
+	TilemCalc *calc;
+
+	if (!dbg || !dbg->emu || !dbg->emu->calc)
+		return;
+
+	calc = dbg->emu->calc;
+	tilem_calc_emulator_lock(dbg->emu);
+	if (calc->z80.r.iff1) {
+		calc->z80.r.iff1 = 0;
+		calc->z80.r.iff2 = 0;
+	}
+	else {
+		calc->z80.r.iff1 = 1;
+		calc->z80.r.iff2 = 1;
+	}
+	tilem_calc_emulator_unlock(dbg->emu);
+}
+
+static gboolean sdl_dbg_point_in_rect(const SDL_Rect *rect, int x, int y)
+{
+	if (!rect)
+		return FALSE;
+	if (x < rect->x || y < rect->y)
+		return FALSE;
+	if (x >= rect->x + rect->w || y >= rect->y + rect->h)
+		return FALSE;
+	return TRUE;
+}
+
+static void sdl_dbg_compute_reg_layout(TilemSdlDebugger *dbg,
+                                       const TilemSdlDebuggerLayout *layout,
+                                       TilemSdlDbgRegLayout *out)
+{
+	int i;
+	int row;
+	int max_rows;
+	int base_x;
+	int base_y;
+	int col_w;
+	int left_x;
+	int right_x;
+	int label_pad;
+	int label_w;
+	int value_w;
+	int row_y;
+	int flag_w;
+	int flag_gap;
+	int x;
+
+	if (!out) {
+		return;
+	}
+
+	memset(out, 0, sizeof(*out));
+
+	if (!dbg || !layout)
+		return;
+	if (layout->regs_rect.h <= 0)
+		return;
+
+	max_rows = layout->reg_lines;
+	if (max_rows <= 0)
+		return;
+
+	base_x = layout->regs_rect.x + SDL_DEBUGGER_MARGIN;
+	base_y = layout->regs_rect.y;
+	col_w = (layout->regs_rect.w - SDL_DEBUGGER_MARGIN * 2) / 2;
+	left_x = base_x;
+	right_x = base_x + col_w;
+	label_pad = dbg->char_width;
+
+	for (row = 0; row < 6 && row < max_rows; row++) {
+		int reg_left = sdl_dbg_reg_left_map[row];
+		int reg_right = sdl_dbg_reg_right_map[row];
+
+		label_w = sdl_dbg_text_width(dbg, sdl_dbg_reg_labels[reg_left]);
+		value_w = sdl_dbg_reg_value_chars(reg_left) * dbg->char_width;
+		row_y = base_y + row * dbg->line_height;
+		out->reg_rects[reg_left] = (SDL_Rect) {
+			left_x + label_w + label_pad,
+			row_y,
+			value_w,
+			dbg->line_height
+		};
+
+		label_w = sdl_dbg_text_width(dbg, sdl_dbg_reg_labels[reg_right]);
+		value_w = sdl_dbg_reg_value_chars(reg_right) * dbg->char_width;
+		out->reg_rects[reg_right] = (SDL_Rect) {
+			right_x + label_w + label_pad,
+			row_y,
+			value_w,
+			dbg->line_height
+		};
+	}
+
+	if (max_rows > 6) {
+		out->has_flags = TRUE;
+		row_y = base_y + 6 * dbg->line_height;
+		flag_w = dbg->char_width * 3;
+		flag_gap = dbg->char_width;
+		x = base_x;
+		for (i = 0; i < 8; i++) {
+			out->flag_rects[i] = (SDL_Rect) {
+				x,
+				row_y,
+				flag_w,
+				dbg->line_height
+			};
+			x += flag_w + flag_gap;
+		}
+	}
+
+	if (max_rows > 7) {
+		out->has_im = TRUE;
+		row_y = base_y + 7 * dbg->line_height;
+		x = base_x;
+
+		label_w = sdl_dbg_text_width(dbg, sdl_dbg_reg_labels[R_IM]);
+		value_w = sdl_dbg_reg_value_chars(R_IM) * dbg->char_width;
+		out->reg_rects[R_IM] = (SDL_Rect) {
+			x + label_w + label_pad,
+			row_y,
+			value_w,
+			dbg->line_height
+		};
+		x = out->reg_rects[R_IM].x + out->reg_rects[R_IM].w
+		    + label_pad * 2;
+
+		label_w = sdl_dbg_text_width(dbg, sdl_dbg_reg_labels[R_I]);
+		value_w = sdl_dbg_reg_value_chars(R_I) * dbg->char_width;
+		out->reg_rects[R_I] = (SDL_Rect) {
+			x + label_w + label_pad,
+			row_y,
+			value_w,
+			dbg->line_height
+		};
+		x = out->reg_rects[R_I].x + out->reg_rects[R_I].w
+		    + label_pad * 2;
+
+		value_w = sdl_dbg_text_width(dbg, "EI") + label_pad * 2;
+		out->iff_rect = (SDL_Rect) {
+			x,
+			row_y,
+			value_w,
+			dbg->line_height
+		};
+	}
+}
+
+static int sdl_dbg_reg_from_point(const TilemSdlDbgRegLayout *layout,
+                                  int x, int y)
+{
+	int i;
+
+	if (!layout)
+		return -1;
+
+	for (i = 0; i < NUM_REGS; i++) {
+		if (layout->reg_rects[i].w <= 0)
+			continue;
+		if (sdl_dbg_point_in_rect(&layout->reg_rects[i], x, y))
+			return i;
+	}
+
+	return -1;
+}
+
+static int sdl_dbg_flag_from_point(const TilemSdlDbgRegLayout *layout,
+                                   int x, int y)
+{
+	int i;
+
+	if (!layout || !layout->has_flags)
+		return -1;
+
+	for (i = 0; i < 8; i++) {
+		if (layout->flag_rects[i].w <= 0)
+			continue;
+		if (sdl_dbg_point_in_rect(&layout->flag_rects[i], x, y))
+			return i;
+	}
+
+	return -1;
 }
 
 static int sdl_dbg_get_core_bp_type(int type, int mode)
@@ -1726,6 +2140,9 @@ static void sdl_dbg_cancel_input(TilemSdlDebugger *dbg)
 	dbg->input_len = 0;
 	dbg->input_buf[0] = '\0';
 	dbg->input_error[0] = '\0';
+	dbg->input_reg_index = -1;
+	dbg->input_mem_addr = 0;
+	dbg->input_mem_logical = TRUE;
 	SDL_StopTextInput();
 }
 
@@ -1797,6 +2214,69 @@ static void sdl_dbg_accept_input(TilemSdlDebugger *dbg)
 			sdl_dbg_apply_breakpoint(dbg, &bp, dbg->input_bp_index);
 		else
 			sdl_dbg_apply_breakpoint(dbg, &bp, -1);
+
+		sdl_dbg_cancel_input(dbg);
+		return;
+	}
+
+	if (dbg->input_mode == SDL_DBG_INPUT_REG) {
+		char *end = NULL;
+		long value;
+
+		if (dbg->input_reg_index == R_IM)
+			value = strtol(dbg->input_buf, &end, 10);
+		else
+			value = strtol(dbg->input_buf, &end, 16);
+
+		if (end == dbg->input_buf || *end != '\0') {
+			g_strlcpy(dbg->input_error, "Invalid value.",
+			          sizeof(dbg->input_error));
+			return;
+		}
+
+		if (value < 0)
+			value = 0;
+		if (dbg->input_reg_index == R_IM) {
+			if (value > 2)
+				value = 2;
+		}
+		else if (dbg->input_reg_index == R_I) {
+			value &= 0xff;
+		}
+		else {
+			value &= 0xffff;
+		}
+
+		sdl_dbg_set_reg_value(dbg, dbg->input_reg_index,
+		                      (dword) value);
+		sdl_dbg_cancel_input(dbg);
+		return;
+	}
+
+	if (dbg->input_mode == SDL_DBG_INPUT_MEM) {
+		char *end = NULL;
+		long value;
+
+		value = strtol(dbg->input_buf, &end, 16);
+		if (end == dbg->input_buf || *end != '\0'
+		    || value < 0 || value > 0xff) {
+			g_strlcpy(dbg->input_error, "Invalid value.",
+			          sizeof(dbg->input_error));
+			return;
+		}
+
+		tilem_calc_emulator_lock(dbg->emu);
+		if (dbg->input_mem_logical) {
+			sdl_dbg_write_mem_byte(dbg->emu->calc,
+			                       dbg->input_mem_addr,
+			                       (byte) value);
+		}
+		else {
+			sdl_dbg_write_mem_byte_physical(dbg->emu->calc,
+			                                dbg->input_mem_addr,
+			                                (byte) value);
+		}
+		tilem_calc_emulator_unlock(dbg->emu);
 
 		sdl_dbg_cancel_input(dbg);
 		return;
@@ -2681,9 +3161,14 @@ TilemSdlDebugger *tilem_sdl_debugger_new(TilemCalcEmulator *emu)
 	dbg->show_breakpoints = FALSE;
 	dbg->bp_selected = 0;
 	dbg->input_mode = SDL_DBG_INPUT_NONE;
+	dbg->input_reg_index = -1;
+	dbg->input_mem_addr = 0;
+	dbg->input_mem_logical = TRUE;
 	dbg->menu_open = FALSE;
 	dbg->menu_active = SDL_DBG_MENU_BAR_NONE;
 	dbg->menu_selected = -1;
+	dbg->context_menu_open = FALSE;
+	dbg->context_menu_selected = -1;
 
 	tilem_config_get("debugger", "mem_logical/b=1", &mem_logical, NULL);
 	dbg->mem_logical = mem_logical;
@@ -2871,6 +3356,43 @@ static void sdl_dbg_handle_key(TilemSdlDebugger *dbg,
 	lines = layout.disasm_lines;
 	if (lines <= 0)
 		lines = 1;
+
+	if (dbg->context_menu_open) {
+		int count = (int) G_N_ELEMENTS(sdl_dbg_context_items);
+		int i;
+
+		if (sym == SDLK_ESCAPE) {
+			sdl_dbg_context_menu_close(dbg);
+			return;
+		}
+		if (sym == SDLK_RETURN || sym == SDLK_KP_ENTER) {
+			if (dbg->context_menu_selected >= 0
+			    && dbg->context_menu_selected < count
+			    && !sdl_dbg_context_items[
+			           dbg->context_menu_selected].separator) {
+				sdl_dbg_context_menu_activate(
+					dbg,
+					sdl_dbg_context_items[
+					    dbg->context_menu_selected].action);
+			}
+			sdl_dbg_context_menu_close(dbg);
+			return;
+		}
+		if (sym == SDLK_UP || sym == SDLK_DOWN) {
+			int dir = (sym == SDLK_UP) ? -1 : 1;
+			int idx = dbg->context_menu_selected;
+			if (idx < 0)
+				idx = 0;
+			for (i = 0; i < count; i++) {
+				idx = (idx + dir + count) % count;
+				if (!sdl_dbg_context_items[idx].separator) {
+					dbg->context_menu_selected = idx;
+					break;
+				}
+			}
+			return;
+		}
+	}
 
 	if (dbg->menu_open && sdl_dbg_menu_handle_key(dbg, sym))
 		return;
@@ -3210,11 +3732,37 @@ static gboolean sdl_dbg_handle_mouse(TilemSdlDebugger *dbg,
                                      const SDL_MouseButtonEvent *event)
 {
 	TilemSdlDebuggerLayout layout;
+	TilemSdlDbgRegLayout reg_layout;
 	int line;
 	dword addr;
 	TilemSdlDbgToolbarButton buttons[8];
 	int count;
 	int i;
+	int reg_index;
+	int flag_index;
+
+	if (dbg->context_menu_open) {
+		if (event->button == SDL_BUTTON_LEFT) {
+			int idx = sdl_dbg_context_menu_hit_test(
+				dbg, event->x, event->y);
+			if (idx >= 0) {
+				sdl_dbg_context_menu_activate(
+					dbg, sdl_dbg_context_items[idx].action);
+			}
+			sdl_dbg_context_menu_close(dbg);
+			return TRUE;
+		}
+		if (event->button == SDL_BUTTON_RIGHT) {
+			sdl_dbg_context_menu_close(dbg);
+			return TRUE;
+		}
+		if (!sdl_dbg_point_in_rect(&dbg->context_menu_rect,
+		                           event->x, event->y)) {
+			sdl_dbg_context_menu_close(dbg);
+			return TRUE;
+		}
+		return TRUE;
+	}
 
 	if (dbg->show_breakpoints || dbg->input_mode != SDL_DBG_INPUT_NONE
 	    || dbg->menu_open)
@@ -3248,6 +3796,95 @@ static gboolean sdl_dbg_handle_mouse(TilemSdlDebugger *dbg,
 	if (!sdl_dbg_is_paused(dbg))
 		return TRUE;
 
+	sdl_dbg_compute_reg_layout(dbg, &layout, &reg_layout);
+	reg_index = sdl_dbg_reg_from_point(&reg_layout,
+	                                   event->x, event->y);
+	if (event->button == SDL_BUTTON_LEFT && reg_index >= 0) {
+		TilemZ80Regs regs;
+		char prefill[16];
+		int width;
+
+		tilem_calc_emulator_lock(dbg->emu);
+		regs = dbg->emu->calc->z80.r;
+		tilem_calc_emulator_unlock(dbg->emu);
+
+		dbg->input_reg_index = reg_index;
+		if (reg_index == R_IM) {
+			snprintf(prefill, sizeof(prefill), "%d",
+			         regs.im);
+		}
+		else {
+			width = sdl_dbg_reg_value_chars(reg_index);
+			snprintf(prefill, sizeof(prefill), "%0*X",
+			         width,
+			         (unsigned) sdl_dbg_reg_value(&regs, reg_index));
+		}
+		sdl_dbg_start_input(dbg, SDL_DBG_INPUT_REG, prefill);
+		return TRUE;
+	}
+
+	flag_index = sdl_dbg_flag_from_point(&reg_layout,
+	                                     event->x, event->y);
+	if (event->button == SDL_BUTTON_LEFT && flag_index >= 0) {
+		sdl_dbg_toggle_flag(dbg, flag_index);
+		return TRUE;
+	}
+
+	if (event->button == SDL_BUTTON_LEFT
+	    && reg_layout.has_im
+	    && sdl_dbg_point_in_rect(&reg_layout.iff_rect,
+	                             event->x, event->y)) {
+		sdl_dbg_toggle_iff(dbg);
+		return TRUE;
+	}
+
+	if (event->button == SDL_BUTTON_LEFT
+	    && sdl_dbg_point_in_rect(&layout.mem_rect,
+	                             event->x, event->y)) {
+		int mem_addr_width;
+		int addr_chars;
+		int cell_w;
+		int rel_x;
+		int row;
+		int col;
+		dword base;
+		dword mem_addr;
+		byte value;
+		char prefill[8];
+
+		mem_addr_width = dbg->mem_logical ? 4
+			: ((dbg->emu->calc->hw.romsize
+			    + dbg->emu->calc->hw.ramsize) > 0xffff ? 6 : 4);
+		addr_chars = mem_addr_width + 1;
+		cell_w = dbg->char_width * 3;
+		rel_x = event->x - (layout.mem_rect.x + SDL_DEBUGGER_MARGIN
+		                    + addr_chars * dbg->char_width);
+		row = sdl_dbg_line_from_y(dbg, layout.mem_rect, event->y);
+		if (row >= 0 && row < layout.mem_rows && rel_x >= 0) {
+			col = rel_x / cell_w;
+			if (col >= 0 && col < SDL_DEBUGGER_MEM_COLS) {
+				base = dbg->mem_addr;
+				mem_addr = base + row * SDL_DEBUGGER_MEM_COLS
+				           + col;
+				tilem_calc_emulator_lock(dbg->emu);
+				value = dbg->mem_logical
+					? sdl_dbg_read_mem_byte(
+						dbg->emu->calc, mem_addr)
+					: sdl_dbg_read_mem_byte_physical(
+						dbg->emu->calc, mem_addr);
+				tilem_calc_emulator_unlock(dbg->emu);
+
+				snprintf(prefill, sizeof(prefill), "%02X",
+				         value);
+				dbg->input_mem_addr = mem_addr;
+				dbg->input_mem_logical = dbg->mem_logical;
+				sdl_dbg_start_input(dbg, SDL_DBG_INPUT_MEM,
+				                    prefill);
+				return TRUE;
+			}
+		}
+	}
+
 	if (event->x < layout.disasm_rect.x
 	    || event->x >= layout.disasm_rect.x + layout.disasm_rect.w
 	    || event->y < layout.disasm_rect.y
@@ -3267,8 +3904,9 @@ static gboolean sdl_dbg_handle_mouse(TilemSdlDebugger *dbg,
 	dbg->disasm_cursor = addr;
 	dbg->disasm_follow_pc = FALSE;
 
-	if (event->button == SDL_BUTTON_RIGHT)
-		sdl_dbg_toggle_breakpoint(dbg, addr);
+	if (event->button == SDL_BUTTON_RIGHT) {
+		sdl_dbg_context_menu_open(dbg, event->x, event->y, addr);
+	}
 	return TRUE;
 }
 
@@ -3279,7 +3917,7 @@ static void sdl_dbg_handle_wheel(TilemSdlDebugger *dbg,
 	int lines;
 
 	if (dbg->show_breakpoints || dbg->input_mode != SDL_DBG_INPUT_NONE
-	    || dbg->menu_open)
+	    || dbg->menu_open || dbg->context_menu_open)
 		return;
 
 	if (!dbg->emu || !dbg->emu->calc)
@@ -3325,20 +3963,55 @@ gboolean tilem_sdl_debugger_handle_event(TilemSdlDebugger *dbg,
 	case SDL_TEXTINPUT:
 		if (dbg->input_mode != SDL_DBG_INPUT_NONE) {
 			size_t add_len = strlen(event->text.text);
-			if (dbg->input_len + (int) add_len
-			    < (int) sizeof(dbg->input_buf) - 1) {
-				memcpy(dbg->input_buf + dbg->input_len,
-				       event->text.text, add_len);
-				dbg->input_len += (int) add_len;
+			size_t i;
+			int max_len = (int) sizeof(dbg->input_buf) - 1;
+
+			if (dbg->input_mode == SDL_DBG_INPUT_REG) {
+				max_len = sdl_dbg_reg_value_chars(
+					dbg->input_reg_index);
+				if (dbg->input_reg_index == R_IM)
+					max_len = 1;
+			}
+			else if (dbg->input_mode == SDL_DBG_INPUT_MEM) {
+				max_len = 2;
+			}
+
+			for (i = 0; i < add_len; i++) {
+				char c = event->text.text[i];
+				if (dbg->input_mode == SDL_DBG_INPUT_REG) {
+					if (dbg->input_reg_index == R_IM) {
+						if (!g_ascii_isdigit(c))
+							continue;
+					}
+					else if (!g_ascii_isxdigit(c)) {
+						continue;
+					}
+				}
+				else if (dbg->input_mode == SDL_DBG_INPUT_MEM) {
+					if (!g_ascii_isxdigit(c))
+						continue;
+				}
+
+				if (dbg->input_len >= max_len)
+					break;
+				dbg->input_buf[dbg->input_len++] = c;
 				dbg->input_buf[dbg->input_len] = '\0';
 			}
 		}
 		return TRUE;
 	case SDL_MOUSEMOTION:
+		if (dbg->context_menu_open) {
+			dbg->context_menu_selected =
+				sdl_dbg_context_menu_hit_test(
+					dbg, event->motion.x,
+					event->motion.y);
+			return TRUE;
+		}
 		sdl_dbg_handle_menu_mouse(dbg, event);
 		return TRUE;
 	case SDL_MOUSEBUTTONDOWN:
-		if (sdl_dbg_handle_menu_mouse(dbg, event))
+		if (!dbg->context_menu_open
+		    && sdl_dbg_handle_menu_mouse(dbg, event))
 			return TRUE;
 		sdl_dbg_handle_mouse(dbg, &event->button);
 		return TRUE;
@@ -3360,6 +4033,109 @@ static void sdl_dbg_render_panel(SDL_Renderer *renderer, SDL_Rect rect)
 	SDL_SetRenderDrawColor(renderer, border.r, border.g, border.b,
 	                       border.a);
 	SDL_RenderDrawRect(renderer, &rect);
+}
+
+static void sdl_dbg_render_regs(TilemSdlDebugger *dbg,
+                                const TilemSdlDebuggerLayout *layout,
+                                const TilemZ80Regs *regs,
+                                gboolean paused)
+{
+	TilemSdlDbgRegLayout reg_layout;
+	SDL_Color text = { 230, 230, 230, 255 };
+	SDL_Color muted = { 150, 150, 150, 255 };
+	SDL_Color border = { 90, 90, 90, 255 };
+	SDL_Color fill = { 40, 40, 40, 255 };
+	SDL_Color highlight = { 60, 110, 170, 255 };
+	SDL_Color label_color;
+	SDL_Color value_color;
+	char buf[16];
+	int i;
+
+	if (!dbg || !layout || !regs)
+		return;
+	if (layout->regs_rect.h <= 0)
+		return;
+
+	label_color = paused ? text : muted;
+	value_color = paused ? text : muted;
+
+	sdl_dbg_compute_reg_layout(dbg, layout, &reg_layout);
+
+	for (i = 0; i < NUM_REGS; i++) {
+		SDL_Rect rect = reg_layout.reg_rects[i];
+		int label_w;
+		int label_x;
+		int value_chars;
+		dword value;
+		const char *label;
+		const char *display;
+
+		if (rect.w <= 0)
+			continue;
+
+		label = sdl_dbg_reg_labels[i];
+		label_w = sdl_dbg_text_width(dbg, label);
+		label_x = rect.x - label_w - dbg->char_width;
+		sdl_dbg_draw_text(dbg, label_x, rect.y, label, label_color);
+
+		value_chars = sdl_dbg_reg_value_chars(i);
+		value = sdl_dbg_reg_value(regs, i);
+		if (i == R_IM)
+			snprintf(buf, sizeof(buf), "%d", (int) value);
+		else
+			snprintf(buf, sizeof(buf), "%0*X", value_chars, value);
+
+		display = buf;
+		if (dbg->input_mode == SDL_DBG_INPUT_REG
+		    && dbg->input_reg_index == i) {
+			SDL_SetRenderDrawColor(dbg->renderer, highlight.r,
+			                       highlight.g, highlight.b,
+			                       highlight.a);
+			SDL_RenderFillRect(dbg->renderer, &rect);
+			display = dbg->input_buf;
+		}
+
+		sdl_dbg_draw_text(dbg, rect.x, rect.y, display, value_color);
+	}
+
+	if (reg_layout.has_flags) {
+		for (i = 0; i < 8; i++) {
+			SDL_Rect rect = reg_layout.flag_rects[i];
+			gboolean set = (regs->af.d & (1 << i)) != 0;
+			SDL_Color color = paused ? (set ? highlight : fill)
+			                         : fill;
+
+			SDL_SetRenderDrawColor(dbg->renderer, color.r, color.g,
+			                       color.b, color.a);
+			SDL_RenderFillRect(dbg->renderer, &rect);
+			SDL_SetRenderDrawColor(dbg->renderer, border.r, border.g,
+			                       border.b, border.a);
+			SDL_RenderDrawRect(dbg->renderer, &rect);
+			sdl_dbg_draw_text(dbg,
+			                  rect.x + dbg->char_width / 2,
+			                  rect.y,
+			                  sdl_dbg_flag_labels[i],
+			                  label_color);
+		}
+	}
+
+	if (reg_layout.has_im && reg_layout.iff_rect.w > 0) {
+		gboolean iff = regs->iff1 != 0;
+		SDL_Rect rect = reg_layout.iff_rect;
+		SDL_Color color = paused ? (iff ? highlight : fill) : fill;
+
+		SDL_SetRenderDrawColor(dbg->renderer, color.r, color.g,
+		                       color.b, color.a);
+		SDL_RenderFillRect(dbg->renderer, &rect);
+		SDL_SetRenderDrawColor(dbg->renderer, border.r, border.g,
+		                       border.b, border.a);
+		SDL_RenderDrawRect(dbg->renderer, &rect);
+		sdl_dbg_draw_text(dbg,
+		                  rect.x + dbg->char_width / 2,
+		                  rect.y,
+		                  "EI",
+		                  label_color);
+	}
 }
 
 static void sdl_dbg_render_toolbar(TilemSdlDebugger *dbg,
@@ -3619,6 +4395,195 @@ static void sdl_dbg_render_menu(TilemSdlDebugger *dbg,
 	                          dbg->menu_selected);
 }
 
+static int sdl_dbg_context_menu_item_height(TilemSdlDebugger *dbg)
+{
+	int font_h = dbg && dbg->font ? TTF_FontHeight(dbg->font)
+	                              : (dbg ? dbg->line_height : 12);
+	return font_h + SDL_DEBUGGER_MENU_PADDING * 2;
+}
+
+static void sdl_dbg_context_menu_close(TilemSdlDebugger *dbg)
+{
+	if (!dbg)
+		return;
+	dbg->context_menu_open = FALSE;
+	dbg->context_menu_selected = -1;
+}
+
+static void sdl_dbg_context_menu_open(TilemSdlDebugger *dbg,
+                                      int x, int y,
+                                      dword addr)
+{
+	int max_w = 0;
+	int item_h;
+	int count = (int) G_N_ELEMENTS(sdl_dbg_context_items);
+	int i;
+	int check_w;
+
+	if (!dbg)
+		return;
+
+	item_h = sdl_dbg_context_menu_item_height(dbg);
+	check_w = dbg->char_width * 2;
+
+	for (i = 0; i < count; i++) {
+		int w;
+		if (sdl_dbg_context_items[i].separator)
+			continue;
+		w = sdl_dbg_text_width(dbg, sdl_dbg_context_items[i].label);
+		if (w > max_w)
+			max_w = w;
+	}
+
+	dbg->context_menu_rect.w = max_w + check_w
+	                           + SDL_DEBUGGER_MENU_PADDING * 2;
+	dbg->context_menu_rect.h = count * item_h
+	                           + SDL_DEBUGGER_MENU_SPACING * 2;
+	dbg->context_menu_rect.x = x;
+	dbg->context_menu_rect.y = y;
+
+	if (dbg->context_menu_rect.x + dbg->context_menu_rect.w
+	    > dbg->window_width) {
+		dbg->context_menu_rect.x =
+			dbg->window_width - dbg->context_menu_rect.w;
+	}
+	if (dbg->context_menu_rect.y + dbg->context_menu_rect.h
+	    > dbg->window_height) {
+		dbg->context_menu_rect.y =
+			dbg->window_height - dbg->context_menu_rect.h;
+	}
+	if (dbg->context_menu_rect.x < 0)
+		dbg->context_menu_rect.x = 0;
+	if (dbg->context_menu_rect.y < 0)
+		dbg->context_menu_rect.y = 0;
+
+	dbg->context_menu_open = TRUE;
+	dbg->context_menu_selected = 0;
+	dbg->context_menu_addr = addr;
+}
+
+static int sdl_dbg_context_menu_hit_test(TilemSdlDebugger *dbg,
+                                         int x, int y)
+{
+	int item_h;
+	int idx;
+	int count = (int) G_N_ELEMENTS(sdl_dbg_context_items);
+
+	if (!dbg || !dbg->context_menu_open)
+		return -1;
+	if (!sdl_dbg_point_in_rect(&dbg->context_menu_rect, x, y))
+		return -1;
+
+	item_h = sdl_dbg_context_menu_item_height(dbg);
+	idx = (y - dbg->context_menu_rect.y
+	       - SDL_DEBUGGER_MENU_SPACING) / item_h;
+	if (idx < 0 || idx >= count)
+		return -1;
+	if (sdl_dbg_context_items[idx].separator)
+		return -1;
+	return idx;
+}
+
+static void sdl_dbg_context_menu_activate(TilemSdlDebugger *dbg,
+                                          TilemSdlDbgContextAction action)
+{
+	if (!dbg)
+		return;
+
+	switch (action) {
+	case SDL_DBG_CTX_BREAKPOINT:
+		sdl_dbg_toggle_breakpoint(dbg, dbg->context_menu_addr);
+		break;
+	case SDL_DBG_CTX_GO_ADDRESS:
+		sdl_dbg_start_goto(dbg);
+		break;
+	case SDL_DBG_CTX_GO_PC:
+		sdl_dbg_go_to_pc(dbg);
+		break;
+	default:
+		break;
+	}
+}
+
+static void sdl_dbg_render_context_menu(TilemSdlDebugger *dbg)
+{
+	SDL_Color bg = { 40, 40, 40, 240 };
+	SDL_Color border = { 90, 90, 90, 255 };
+	SDL_Color text = { 230, 230, 230, 255 };
+	SDL_Color highlight = { 60, 110, 170, 255 };
+	SDL_Color item_color = text;
+	int item_h;
+	int count = (int) G_N_ELEMENTS(sdl_dbg_context_items);
+	int i;
+	int y;
+	int check_w;
+
+	if (!dbg || !dbg->context_menu_open)
+		return;
+
+	item_h = sdl_dbg_context_menu_item_height(dbg);
+	check_w = dbg->char_width * 2;
+
+	SDL_SetRenderDrawColor(dbg->renderer, bg.r, bg.g, bg.b, bg.a);
+	SDL_RenderFillRect(dbg->renderer, &dbg->context_menu_rect);
+	SDL_SetRenderDrawColor(dbg->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(dbg->renderer, &dbg->context_menu_rect);
+
+	for (i = 0; i < count; i++) {
+		SDL_Rect rect = {
+			dbg->context_menu_rect.x,
+			dbg->context_menu_rect.y + SDL_DEBUGGER_MENU_SPACING
+			    + i * item_h,
+			dbg->context_menu_rect.w,
+			item_h
+		};
+
+		if (sdl_dbg_context_items[i].separator) {
+			SDL_SetRenderDrawColor(dbg->renderer, border.r,
+			                       border.g, border.b, border.a);
+			y = rect.y + rect.h / 2;
+			SDL_RenderDrawLine(dbg->renderer,
+			                   rect.x + SDL_DEBUGGER_MENU_PADDING,
+			                   y,
+			                   rect.x + rect.w
+			                       - SDL_DEBUGGER_MENU_PADDING,
+			                   y);
+			continue;
+		}
+
+		if (i == dbg->context_menu_selected) {
+			SDL_SetRenderDrawColor(dbg->renderer, highlight.r,
+			                       highlight.g, highlight.b,
+			                       highlight.a);
+			SDL_RenderFillRect(dbg->renderer, &rect);
+		}
+
+		if (sdl_dbg_context_items[i].action == SDL_DBG_CTX_BREAKPOINT
+		    && sdl_dbg_find_exec_breakpoint(dbg,
+		                                    dbg->context_menu_addr,
+		                                    dbg->mem_logical) >= 0) {
+			SDL_Rect mark = {
+				rect.x + SDL_DEBUGGER_MENU_PADDING,
+				rect.y + SDL_DEBUGGER_MENU_PADDING,
+				check_w,
+				rect.h - SDL_DEBUGGER_MENU_PADDING * 2
+			};
+			sdl_dbg_draw_check(dbg->renderer,
+			                   mark.x,
+			                   mark.y,
+			                   MIN(mark.w, mark.h),
+			                   item_color);
+		}
+
+		sdl_dbg_draw_text(dbg,
+		                  rect.x + SDL_DEBUGGER_MENU_PADDING + check_w,
+		                  rect.y + (rect.h - dbg->line_height) / 2,
+		                  sdl_dbg_context_items[i].label,
+		                  item_color);
+	}
+}
+
 void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 {
 	TilemSdlDebuggerLayout layout;
@@ -3637,8 +4602,6 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 	dword addr;
 	dword pc;
 	dword pc_phys;
-	byte f;
-	char line[SDL_DEBUGGER_LINE_BUFSZ];
 	char disasm_lines[SDL_DEBUGGER_MAX_LINES][SDL_DEBUGGER_LINE_BUFSZ];
 	dword disasm_addrs[SDL_DEBUGGER_MAX_LINES];
 	char mem_lines[SDL_DEBUGGER_MAX_LINES][SDL_DEBUGGER_LINE_BUFSZ];
@@ -3671,7 +4634,6 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 	mem_addr_width = dbg->mem_logical ? 4 : disasm_addr_width;
 	regs = calc->z80.r;
 	pc = regs.pc.w.l;
-	f = regs.af.b.l;
 	pc_phys = (*calc->hw.mem_ltop)(calc, pc);
 
 	if (dbg->disasm_follow_pc) {
@@ -3823,109 +4785,7 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 		                  y, disasm_lines[i], color);
 	}
 
-	if (layout.regs_rect.h > 0) {
-		char flags[16];
-		int reg_lines = layout.regs_rect.h / dbg->line_height;
-		int line_idx = 0;
-
-		snprintf(flags, sizeof(flags), "Flags: %c%c%c%c%c%c%c%c",
-		         (f & 0x80) ? 'S' : '.',
-		         (f & 0x40) ? 'Z' : '.',
-		         (f & 0x20) ? 'Y' : '.',
-		         (f & 0x10) ? 'H' : '.',
-		         (f & 0x08) ? 'X' : '.',
-		         (f & 0x04) ? 'P' : '.',
-		         (f & 0x02) ? 'N' : '.',
-		         (f & 0x01) ? 'C' : '.');
-
-		if (line_idx < reg_lines) {
-			snprintf(line, sizeof(line), "AF:%04X  BC:%04X",
-			         regs.af.w.l, regs.bc.w.l);
-			sdl_dbg_draw_text(dbg,
-			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
-			                  layout.regs_rect.y
-			                      + dbg->line_height * line_idx,
-			                  line, panel_text);
-			line_idx++;
-		}
-		if (line_idx < reg_lines) {
-			snprintf(line, sizeof(line), "DE:%04X  HL:%04X",
-			         regs.de.w.l, regs.hl.w.l);
-			sdl_dbg_draw_text(dbg,
-			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
-			                  layout.regs_rect.y
-			                      + dbg->line_height * line_idx,
-			                  line, panel_text);
-			line_idx++;
-		}
-		if (line_idx < reg_lines) {
-			snprintf(line, sizeof(line), "IX:%04X  IY:%04X",
-			         regs.ix.w.l, regs.iy.w.l);
-			sdl_dbg_draw_text(dbg,
-			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
-			                  layout.regs_rect.y
-			                      + dbg->line_height * line_idx,
-			                  line, panel_text);
-			line_idx++;
-		}
-		if (line_idx < reg_lines) {
-			snprintf(line, sizeof(line), "SP:%04X  PC:%04X",
-			         regs.sp.w.l, regs.pc.w.l);
-			sdl_dbg_draw_text(dbg,
-			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
-			                  layout.regs_rect.y
-			                      + dbg->line_height * line_idx,
-			                  line, panel_text);
-			line_idx++;
-		}
-		if (line_idx < reg_lines) {
-			snprintf(line, sizeof(line), "AF':%04X  BC':%04X",
-			         regs.af2.w.l, regs.bc2.w.l);
-			sdl_dbg_draw_text(dbg,
-			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
-			                  layout.regs_rect.y
-			                      + dbg->line_height * line_idx,
-			                  line, panel_text);
-			line_idx++;
-		}
-		if (line_idx < reg_lines) {
-			snprintf(line, sizeof(line), "DE':%04X  HL':%04X",
-			         regs.de2.w.l, regs.hl2.w.l);
-			sdl_dbg_draw_text(dbg,
-			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
-			                  layout.regs_rect.y
-			                      + dbg->line_height * line_idx,
-			                  line, panel_text);
-			line_idx++;
-		}
-		if (line_idx < reg_lines) {
-			snprintf(line, sizeof(line), "IM:%d  I:%02X",
-			         regs.im, regs.ir.b.h);
-			sdl_dbg_draw_text(dbg,
-			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
-			                  layout.regs_rect.y
-			                      + dbg->line_height * line_idx,
-			                  line, panel_text);
-			line_idx++;
-		}
-		if (line_idx < reg_lines) {
-			snprintf(line, sizeof(line), "IFF1:%d IFF2:%d",
-			         regs.iff1, regs.iff2);
-			sdl_dbg_draw_text(dbg,
-			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
-			                  layout.regs_rect.y
-			                      + dbg->line_height * line_idx,
-			                  line, panel_text);
-			line_idx++;
-		}
-		if (line_idx < reg_lines) {
-			sdl_dbg_draw_text(dbg,
-			                  layout.regs_rect.x + SDL_DEBUGGER_MARGIN,
-			                  layout.regs_rect.y
-			                      + dbg->line_height * line_idx,
-			                  flags, panel_muted);
-		}
-	}
+	sdl_dbg_render_regs(dbg, &layout, &regs, dbg->emu->paused);
 
 	for (i = 0; i < stack_count; i++) {
 		int y = layout.stack_rect.y + i * dbg->line_height;
@@ -3948,8 +4808,39 @@ void tilem_sdl_debugger_render(TilemSdlDebugger *dbg)
 		                  y, mem_lines[i], panel_text);
 	}
 
+	if (dbg->input_mode == SDL_DBG_INPUT_MEM
+	    && dbg->input_mem_logical == dbg->mem_logical) {
+		dword base = dbg->mem_addr;
+		dword addr_in = dbg->input_mem_addr;
+		if (addr_in >= base) {
+			dword offset = addr_in - base;
+			int row = (int) (offset / SDL_DEBUGGER_MEM_COLS);
+			int col = (int) (offset % SDL_DEBUGGER_MEM_COLS);
+			if (row >= 0 && row < layout.mem_rows
+			    && col >= 0 && col < SDL_DEBUGGER_MEM_COLS) {
+				int addr_chars = mem_addr_width + 1;
+				int cell_w = dbg->char_width * 3;
+				int x = layout.mem_rect.x
+				        + SDL_DEBUGGER_MARGIN
+				        + addr_chars * dbg->char_width
+				        + col * cell_w;
+				int y = layout.mem_rect.y
+				        + row * dbg->line_height;
+				SDL_Rect cell = { x, y, cell_w,
+				                  dbg->line_height };
+				SDL_SetRenderDrawColor(dbg->renderer,
+				                       highlight.r, highlight.g,
+				                       highlight.b, highlight.a);
+				SDL_RenderFillRect(dbg->renderer, &cell);
+				sdl_dbg_draw_text(dbg, x + dbg->char_width, y,
+				                  dbg->input_buf, panel_text);
+			}
+		}
+	}
+
 	sdl_dbg_render_breakpoints(dbg);
 	sdl_dbg_render_menu(dbg, &layout);
+	sdl_dbg_render_context_menu(dbg);
 
 	SDL_RenderPresent(dbg->renderer);
 

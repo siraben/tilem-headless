@@ -30,6 +30,7 @@
 #include <errno.h>
 
 #include <glib.h>
+#include <glib-object.h>
 #include <glib/gstdio.h>
 #include <ticalcs.h>
 #include <tilem.h>
@@ -64,6 +65,30 @@ void tilem_link_get_dirlist_with_callback(TilemCalcEmulator *emu,
                                                            const char *error_message,
                                                            gpointer data),
                                           gpointer data);
+typedef struct _TilemAnimFrame TilemAnimFrame;
+typedef struct {
+	guint32 pixel;
+	guint16 red;
+	guint16 green;
+	guint16 blue;
+} GdkColor;
+void tilem_animation_set_size(TilemAnimation *anim, int width, int height);
+void tilem_animation_set_colors(TilemAnimation *anim,
+                                const GdkColor *foreground,
+                                const GdkColor *background);
+void tilem_animation_set_speed(TilemAnimation *anim, gdouble factor);
+gdouble tilem_animation_get_speed(TilemAnimation *anim);
+TilemAnimFrame *tilem_animation_next_frame(TilemAnimation *anim,
+                                           TilemAnimFrame *frm);
+int tilem_anim_frame_get_duration(TilemAnimFrame *frm);
+void tilem_animation_get_indexed_image(TilemAnimation *anim,
+                                       TilemAnimFrame *frm,
+                                       byte **buffer,
+                                       int *width, int *height);
+gboolean tilem_animation_save(TilemAnimation *anim,
+                              const char *fname, const char *type,
+                              char **option_keys, char **option_values,
+                              GError **err);
 int name_to_model(const char *name);
 int get_calc_model(TilemCalc *calc);
 char *utf8_to_filename(const char *utf8str);
@@ -98,6 +123,97 @@ typedef struct {
 	GPtrArray *entries;
 	GArray *selected_flags;
 } TilemSdlReceiveDialog;
+
+typedef enum {
+	SDL_SS_INPUT_NONE,
+	SDL_SS_INPUT_WIDTH,
+	SDL_SS_INPUT_HEIGHT,
+	SDL_SS_INPUT_SPEED,
+	SDL_SS_INPUT_FG_R,
+	SDL_SS_INPUT_FG_G,
+	SDL_SS_INPUT_FG_B,
+	SDL_SS_INPUT_BG_R,
+	SDL_SS_INPUT_BG_G,
+	SDL_SS_INPUT_BG_B
+} TilemSdlScreenshotInput;
+
+typedef enum {
+	SDL_SS_ITEM_NONE = -1,
+	SDL_SS_ITEM_GRAB,
+	SDL_SS_ITEM_RECORD,
+	SDL_SS_ITEM_STOP,
+	SDL_SS_ITEM_GRAYSCALE,
+	SDL_SS_ITEM_SIZE,
+	SDL_SS_ITEM_WIDTH,
+	SDL_SS_ITEM_HEIGHT,
+	SDL_SS_ITEM_SPEED,
+	SDL_SS_ITEM_FG_R,
+	SDL_SS_ITEM_FG_G,
+	SDL_SS_ITEM_FG_B,
+	SDL_SS_ITEM_BG_R,
+	SDL_SS_ITEM_BG_G,
+	SDL_SS_ITEM_BG_B,
+	SDL_SS_ITEM_SAVE,
+	SDL_SS_ITEM_CANCEL
+} TilemSdlScreenshotItem;
+
+typedef struct {
+	gboolean visible;
+	gboolean size_menu_open;
+	int size_menu_hover;
+	int hover;
+	TilemSdlScreenshotInput input_mode;
+	char input_buf[32];
+	int input_len;
+	int selected_size;
+	int width;
+	int height;
+	double speed;
+	gboolean grayscale;
+	int fg_r;
+	int fg_g;
+	int fg_b;
+	int bg_r;
+	int bg_g;
+	int bg_b;
+	TilemAnimation *current_anim;
+	gboolean current_anim_grayscale;
+	TilemAnimFrame *preview_frame;
+	Uint32 preview_frame_start;
+	SDL_Texture *preview_texture;
+	int preview_width;
+	int preview_height;
+	dword *preview_palette;
+	gboolean preview_dirty;
+} TilemSdlScreenshotDialog;
+
+typedef struct {
+	SDL_Rect panel;
+	SDL_Rect preview_rect;
+	SDL_Rect grab_rect;
+	SDL_Rect record_rect;
+	SDL_Rect stop_rect;
+	SDL_Rect grayscale_rect;
+	SDL_Rect size_rect;
+	SDL_Rect width_rect;
+	SDL_Rect height_rect;
+	SDL_Rect speed_rect;
+	SDL_Rect fg_label_rect;
+	SDL_Rect bg_label_rect;
+	SDL_Rect fg_r_rect;
+	SDL_Rect fg_g_rect;
+	SDL_Rect fg_b_rect;
+	SDL_Rect fg_color_rect;
+	SDL_Rect bg_r_rect;
+	SDL_Rect bg_g_rect;
+	SDL_Rect bg_b_rect;
+	SDL_Rect bg_color_rect;
+	SDL_Rect save_rect;
+	SDL_Rect cancel_rect;
+	int text_h;
+	int row_h;
+	int padding;
+} TilemSdlScreenshotLayout;
 
 typedef struct {
 	TilemCalcEmulator *emu;
@@ -139,6 +255,7 @@ typedef struct {
 	int prefs_hover;
 	TilemSdlSlotDialog slot_dialog;
 	TilemSdlReceiveDialog receive_dialog;
+	TilemSdlScreenshotDialog screenshot_dialog;
 	GPtrArray *drop_files;
 	gboolean drop_active;
 	TTF_Font *menu_font;
@@ -283,11 +400,43 @@ static const TilemSdlMenuItem sdl_menu_macro_items[] = {
 };
 
 static void sdl_update_skin_for_calc(TilemSdlUi *ui);
+static gboolean sdl_is_wide_screen(TilemSdlUi *ui);
+static char *sdl_find_free_filename(const char *folder,
+                                    const char *basename,
+                                    const char *extension);
+static char *sdl_guess_image_format(const char *filename,
+                                    const char *default_format);
+static char *sdl_ensure_extension(const char *filename,
+                                  const char *format);
 
 #define SDL_SCREENSHOT_DEFAULT_WIDTH_96 192
 #define SDL_SCREENSHOT_DEFAULT_HEIGHT_96 128
 #define SDL_SCREENSHOT_DEFAULT_WIDTH_128 256
 #define SDL_SCREENSHOT_DEFAULT_HEIGHT_128 128
+#define SDL_SCREENSHOT_DEFAULT_FORMAT "png"
+#define SDL_SCREENSHOT_MAX_WIDTH 750
+#define SDL_SCREENSHOT_MAX_HEIGHT 500
+
+typedef struct {
+	int width;
+	int height;
+} TilemSdlScreenshotSize;
+
+static const TilemSdlScreenshotSize sdl_screenshot_sizes_normal[] = {
+	{ 96, 64 },
+	{ 192, 128 },
+	{ 288, 192 }
+};
+
+static const TilemSdlScreenshotSize sdl_screenshot_sizes_wide[] = {
+	{ 128, 64 },
+	{ 128, 77 },
+	{ 214, 128 },
+	{ 256, 128 },
+	{ 256, 153 },
+	{ 321, 192 },
+	{ 384, 192 }
+};
 
 static const unsigned char sdl_font8x8_basic[128][8] = {
 	{ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 }, /* 0x00 */
@@ -2755,6 +2904,1483 @@ static void sdl_render_preferences(TilemSdlUi *ui)
 	g_free(skin_value);
 }
 
+static int sdl_hex_value(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return 10 + (c - 'a');
+	if (c >= 'A' && c <= 'F')
+		return 10 + (c - 'A');
+	return -1;
+}
+
+static gboolean sdl_parse_color_string(const char *value,
+                                       int *r, int *g, int *b)
+{
+	int v1;
+	int v2;
+
+	if (!value || value[0] != '#')
+		return FALSE;
+	if (strlen(value) == 4) {
+		v1 = sdl_hex_value(value[1]);
+		v2 = sdl_hex_value(value[2]);
+		if (v1 < 0 || v2 < 0 || sdl_hex_value(value[3]) < 0)
+			return FALSE;
+		*r = v1 * 17;
+		*g = v2 * 17;
+		*b = sdl_hex_value(value[3]) * 17;
+		return TRUE;
+	}
+	if (strlen(value) == 7) {
+		v1 = sdl_hex_value(value[1]);
+		v2 = sdl_hex_value(value[2]);
+		if (v1 < 0 || v2 < 0)
+			return FALSE;
+		*r = v1 * 16 + v2;
+		v1 = sdl_hex_value(value[3]);
+		v2 = sdl_hex_value(value[4]);
+		if (v1 < 0 || v2 < 0)
+			return FALSE;
+		*g = v1 * 16 + v2;
+		v1 = sdl_hex_value(value[5]);
+		v2 = sdl_hex_value(value[6]);
+		if (v1 < 0 || v2 < 0)
+			return FALSE;
+		*b = v1 * 16 + v2;
+		return TRUE;
+	}
+	return FALSE;
+}
+
+static char *sdl_color_to_string(int r, int g, int b)
+{
+	r = CLAMP(r, 0, 255);
+	g = CLAMP(g, 0, 255);
+	b = CLAMP(b, 0, 255);
+	return g_strdup_printf("#%02X%02X%02X", r, g, b);
+}
+
+static void sdl_screenshot_free_preview(TilemSdlScreenshotDialog *dlg)
+{
+	if (!dlg)
+		return;
+	if (dlg->preview_texture) {
+		SDL_DestroyTexture(dlg->preview_texture);
+		dlg->preview_texture = NULL;
+	}
+	dlg->preview_width = 0;
+	dlg->preview_height = 0;
+}
+
+static void sdl_screenshot_update_palette(TilemSdlScreenshotDialog *dlg)
+{
+	if (!dlg)
+		return;
+	if (dlg->preview_palette) {
+		tilem_free(dlg->preview_palette);
+		dlg->preview_palette = NULL;
+	}
+
+	dlg->preview_palette = tilem_color_palette_new(
+		CLAMP(dlg->bg_r, 0, 255),
+		CLAMP(dlg->bg_g, 0, 255),
+		CLAMP(dlg->bg_b, 0, 255),
+		CLAMP(dlg->fg_r, 0, 255),
+		CLAMP(dlg->fg_g, 0, 255),
+		CLAMP(dlg->fg_b, 0, 255),
+		SDL_LCD_GAMMA);
+	dlg->preview_dirty = TRUE;
+}
+
+static void sdl_screenshot_apply_anim_settings(TilemSdlScreenshotDialog *dlg)
+{
+	GdkColor fg;
+	GdkColor bg;
+
+	if (!dlg || !dlg->current_anim)
+		return;
+
+	tilem_animation_set_size(dlg->current_anim, dlg->width, dlg->height);
+	tilem_animation_set_speed(dlg->current_anim,
+	                          dlg->speed > 0.0 ? dlg->speed : 1.0);
+
+	fg.red = (guint16) CLAMP(dlg->fg_r, 0, 255) * 257;
+	fg.green = (guint16) CLAMP(dlg->fg_g, 0, 255) * 257;
+	fg.blue = (guint16) CLAMP(dlg->fg_b, 0, 255) * 257;
+	fg.pixel = 0;
+
+	bg.red = (guint16) CLAMP(dlg->bg_r, 0, 255) * 257;
+	bg.green = (guint16) CLAMP(dlg->bg_g, 0, 255) * 257;
+	bg.blue = (guint16) CLAMP(dlg->bg_b, 0, 255) * 257;
+	bg.pixel = 0;
+
+	tilem_animation_set_colors(dlg->current_anim, &fg, &bg);
+}
+
+static void sdl_screenshot_set_current_anim(TilemSdlUi *ui,
+                                            TilemAnimation *anim)
+{
+	TilemSdlScreenshotDialog *dlg;
+
+	if (!ui)
+		return;
+	dlg = &ui->screenshot_dialog;
+
+	if (anim)
+		g_object_ref(anim);
+	if (dlg->current_anim)
+		g_object_unref(dlg->current_anim);
+	dlg->current_anim = anim;
+
+	dlg->preview_frame = NULL;
+	dlg->preview_frame_start = 0;
+	sdl_screenshot_free_preview(dlg);
+	if (dlg->current_anim) {
+		sdl_screenshot_update_palette(dlg);
+		sdl_screenshot_apply_anim_settings(dlg);
+		dlg->preview_dirty = TRUE;
+	}
+}
+
+static const TilemSdlScreenshotSize *sdl_screenshot_sizes_for_calc(
+	TilemSdlUi *ui, int *count)
+{
+	if (sdl_is_wide_screen(ui)) {
+		*count = (int) G_N_ELEMENTS(sdl_screenshot_sizes_wide);
+		return sdl_screenshot_sizes_wide;
+	}
+	*count = (int) G_N_ELEMENTS(sdl_screenshot_sizes_normal);
+	return sdl_screenshot_sizes_normal;
+}
+
+static int sdl_screenshot_find_size_index(
+	const TilemSdlScreenshotSize *sizes,
+	int count,
+	int width,
+	int height)
+{
+	int i;
+
+	for (i = 0; i < count; i++) {
+		if (sizes[i].width == width && sizes[i].height == height)
+			return i;
+	}
+
+	return count;
+}
+
+static void sdl_screenshot_set_size(TilemSdlUi *ui, int width, int height)
+{
+	TilemSdlScreenshotDialog *dlg;
+	const TilemSdlScreenshotSize *sizes;
+	int count;
+
+	if (!ui)
+		return;
+
+	dlg = &ui->screenshot_dialog;
+	dlg->width = CLAMP(width, 1, SDL_SCREENSHOT_MAX_WIDTH);
+	dlg->height = CLAMP(height, 1, SDL_SCREENSHOT_MAX_HEIGHT);
+
+	sizes = sdl_screenshot_sizes_for_calc(ui, &count);
+	dlg->selected_size = sdl_screenshot_find_size_index(
+		sizes, count, dlg->width, dlg->height);
+
+	sdl_screenshot_apply_anim_settings(dlg);
+	dlg->preview_dirty = TRUE;
+}
+
+static const char *sdl_screenshot_size_label(
+	const TilemSdlScreenshotSize *sizes,
+	int count,
+	int index,
+	char *buf,
+	size_t buf_size)
+{
+	if (!buf || buf_size == 0)
+		return "";
+	if (index < 0 || index >= count) {
+		g_snprintf(buf, buf_size, "Custom");
+		return buf;
+	}
+	g_snprintf(buf, buf_size, "%d x %d",
+	           sizes[index].width, sizes[index].height);
+	return buf;
+}
+
+static void sdl_screenshot_dialog_layout(TilemSdlUi *ui,
+                                         TilemSdlScreenshotLayout *layout)
+{
+	int text_h = sdl_pref_text_height(ui);
+	int row_h = MAX(text_h + 8, 22);
+	int padding = 16;
+	int panel_w = ui->window_width - padding * 2;
+	int panel_h;
+	int preview_h;
+	int button_w;
+	int button_h = row_h + 4;
+	int content_x;
+	int content_w;
+	int y;
+	int label_w;
+	int field_w;
+	int color_w;
+	int buttons_y;
+
+	if (panel_w > 720)
+		panel_w = 720;
+	if (panel_w < 420)
+		panel_w = MAX(ui->window_width - 10, 320);
+
+	button_w = sdl_menu_text_width(ui, "Record") + 20;
+	preview_h = row_h * 6;
+	if (preview_h < 180)
+		preview_h = 180;
+	if (preview_h > 240)
+		preview_h = 240;
+
+	panel_h = padding * 2 + preview_h;
+	panel_h += (row_h + 6) * 7;
+	panel_h += button_h + 10;
+
+	layout->panel.w = panel_w;
+	layout->panel.h = panel_h;
+	layout->panel.x = (ui->window_width - panel_w) / 2;
+	layout->panel.y = (ui->window_height - panel_h) / 2;
+
+	layout->text_h = text_h;
+	layout->row_h = row_h;
+	layout->padding = padding;
+
+	content_x = layout->panel.x + padding;
+	content_w = panel_w - padding * 2;
+	y = layout->panel.y + padding;
+
+	layout->preview_rect = (SDL_Rect) {
+		content_x,
+		y,
+		content_w - button_w - padding,
+		preview_h
+	};
+
+	layout->grab_rect = (SDL_Rect) {
+		layout->preview_rect.x + layout->preview_rect.w + padding,
+		y,
+		button_w,
+		button_h
+	};
+	layout->record_rect = (SDL_Rect) {
+		layout->grab_rect.x,
+		y + button_h + 6,
+		button_w,
+		button_h
+	};
+	layout->stop_rect = (SDL_Rect) {
+		layout->grab_rect.x,
+		y + (button_h + 6) * 2,
+		button_w,
+		button_h
+	};
+
+	y += preview_h + padding;
+
+	layout->grayscale_rect = (SDL_Rect) { content_x, y, content_w, row_h };
+	y += row_h + 6;
+	layout->size_rect = (SDL_Rect) { content_x, y, content_w, row_h };
+	y += row_h + 6;
+	layout->width_rect = (SDL_Rect) { content_x, y, content_w, row_h };
+	y += row_h + 6;
+	layout->height_rect = (SDL_Rect) { content_x, y, content_w, row_h };
+	y += row_h + 6;
+	layout->speed_rect = (SDL_Rect) { content_x, y, content_w, row_h };
+	y += row_h + 6;
+
+	label_w = sdl_menu_text_width(ui, "Background:") + 8;
+	field_w = sdl_menu_text_width(ui, "0000") + 18;
+	color_w = row_h - 8;
+
+	layout->fg_label_rect = (SDL_Rect) { content_x, y, label_w, row_h };
+	layout->fg_r_rect = (SDL_Rect) {
+		content_x + label_w,
+		y,
+		field_w,
+		row_h
+	};
+	layout->fg_g_rect = (SDL_Rect) {
+		layout->fg_r_rect.x + field_w + 6,
+		y,
+		field_w,
+		row_h
+	};
+	layout->fg_b_rect = (SDL_Rect) {
+		layout->fg_g_rect.x + field_w + 6,
+		y,
+		field_w,
+		row_h
+	};
+	layout->fg_color_rect = (SDL_Rect) {
+		layout->fg_b_rect.x + field_w + 6,
+		y + (row_h - color_w) / 2,
+		color_w,
+		color_w
+	};
+	y += row_h + 6;
+
+	layout->bg_label_rect = (SDL_Rect) { content_x, y, label_w, row_h };
+	layout->bg_r_rect = (SDL_Rect) {
+		content_x + label_w,
+		y,
+		field_w,
+		row_h
+	};
+	layout->bg_g_rect = (SDL_Rect) {
+		layout->bg_r_rect.x + field_w + 6,
+		y,
+		field_w,
+		row_h
+	};
+	layout->bg_b_rect = (SDL_Rect) {
+		layout->bg_g_rect.x + field_w + 6,
+		y,
+		field_w,
+		row_h
+	};
+	layout->bg_color_rect = (SDL_Rect) {
+		layout->bg_b_rect.x + field_w + 6,
+		y + (row_h - color_w) / 2,
+		color_w,
+		color_w
+	};
+
+	buttons_y = layout->panel.y + layout->panel.h - padding - button_h;
+	layout->save_rect = (SDL_Rect) {
+		layout->panel.x + layout->panel.w - padding - button_w * 2 - 10,
+		buttons_y,
+		button_w,
+		button_h
+	};
+	layout->cancel_rect = (SDL_Rect) {
+		layout->panel.x + layout->panel.w - padding - button_w,
+		buttons_y,
+		button_w,
+		button_h
+	};
+	(void) color_w;
+}
+
+static TilemSdlScreenshotItem sdl_screenshot_dialog_hit_test(
+	TilemSdlUi *ui,
+	const TilemSdlScreenshotLayout *layout,
+	int x, int y)
+{
+	(void) ui;
+	if (!sdl_point_in_rect(x, y, &layout->panel))
+		return SDL_SS_ITEM_NONE;
+	if (sdl_point_in_rect(x, y, &layout->grab_rect))
+		return SDL_SS_ITEM_GRAB;
+	if (sdl_point_in_rect(x, y, &layout->record_rect))
+		return SDL_SS_ITEM_RECORD;
+	if (sdl_point_in_rect(x, y, &layout->stop_rect))
+		return SDL_SS_ITEM_STOP;
+	if (sdl_point_in_rect(x, y, &layout->grayscale_rect))
+		return SDL_SS_ITEM_GRAYSCALE;
+	if (sdl_point_in_rect(x, y, &layout->size_rect))
+		return SDL_SS_ITEM_SIZE;
+	if (sdl_point_in_rect(x, y, &layout->width_rect))
+		return SDL_SS_ITEM_WIDTH;
+	if (sdl_point_in_rect(x, y, &layout->height_rect))
+		return SDL_SS_ITEM_HEIGHT;
+	if (sdl_point_in_rect(x, y, &layout->speed_rect))
+		return SDL_SS_ITEM_SPEED;
+	if (sdl_point_in_rect(x, y, &layout->fg_r_rect))
+		return SDL_SS_ITEM_FG_R;
+	if (sdl_point_in_rect(x, y, &layout->fg_g_rect))
+		return SDL_SS_ITEM_FG_G;
+	if (sdl_point_in_rect(x, y, &layout->fg_b_rect))
+		return SDL_SS_ITEM_FG_B;
+	if (sdl_point_in_rect(x, y, &layout->bg_r_rect))
+		return SDL_SS_ITEM_BG_R;
+	if (sdl_point_in_rect(x, y, &layout->bg_g_rect))
+		return SDL_SS_ITEM_BG_G;
+	if (sdl_point_in_rect(x, y, &layout->bg_b_rect))
+		return SDL_SS_ITEM_BG_B;
+	if (sdl_point_in_rect(x, y, &layout->save_rect))
+		return SDL_SS_ITEM_SAVE;
+	if (sdl_point_in_rect(x, y, &layout->cancel_rect))
+		return SDL_SS_ITEM_CANCEL;
+	return SDL_SS_ITEM_NONE;
+}
+
+static void sdl_screenshot_dialog_start_input(
+	TilemSdlScreenshotDialog *dlg,
+	TilemSdlScreenshotInput mode,
+	const char *prefill)
+{
+	if (!dlg)
+		return;
+	dlg->input_mode = mode;
+	dlg->input_len = 0;
+	dlg->input_buf[0] = '\0';
+	if (prefill) {
+		dlg->input_len = (int) g_strlcpy(
+			dlg->input_buf, prefill, sizeof(dlg->input_buf));
+	}
+	SDL_StartTextInput();
+}
+
+static void sdl_screenshot_dialog_cancel_input(TilemSdlScreenshotDialog *dlg)
+{
+	if (!dlg)
+		return;
+	dlg->input_mode = SDL_SS_INPUT_NONE;
+	dlg->input_len = 0;
+	dlg->input_buf[0] = '\0';
+	SDL_StopTextInput();
+}
+
+static void sdl_screenshot_dialog_apply_input(TilemSdlUi *ui)
+{
+	TilemSdlScreenshotDialog *dlg;
+	int value;
+	double dvalue;
+
+	if (!ui)
+		return;
+	dlg = &ui->screenshot_dialog;
+
+	switch (dlg->input_mode) {
+	case SDL_SS_INPUT_WIDTH:
+		value = atoi(dlg->input_buf);
+		if (value > 0)
+			sdl_screenshot_set_size(ui, value, dlg->height);
+		break;
+	case SDL_SS_INPUT_HEIGHT:
+		value = atoi(dlg->input_buf);
+		if (value > 0)
+			sdl_screenshot_set_size(ui, dlg->width, value);
+		break;
+	case SDL_SS_INPUT_SPEED:
+		dvalue = g_ascii_strtod(dlg->input_buf, NULL);
+		if (dvalue >= 0.1 && dvalue <= 100.0) {
+			dlg->speed = dvalue;
+			sdl_screenshot_apply_anim_settings(dlg);
+			dlg->preview_dirty = TRUE;
+		}
+		break;
+	case SDL_SS_INPUT_FG_R:
+		value = atoi(dlg->input_buf);
+		dlg->fg_r = CLAMP(value, 0, 255);
+		sdl_screenshot_update_palette(dlg);
+		sdl_screenshot_apply_anim_settings(dlg);
+		break;
+	case SDL_SS_INPUT_FG_G:
+		value = atoi(dlg->input_buf);
+		dlg->fg_g = CLAMP(value, 0, 255);
+		sdl_screenshot_update_palette(dlg);
+		sdl_screenshot_apply_anim_settings(dlg);
+		break;
+	case SDL_SS_INPUT_FG_B:
+		value = atoi(dlg->input_buf);
+		dlg->fg_b = CLAMP(value, 0, 255);
+		sdl_screenshot_update_palette(dlg);
+		sdl_screenshot_apply_anim_settings(dlg);
+		break;
+	case SDL_SS_INPUT_BG_R:
+		value = atoi(dlg->input_buf);
+		dlg->bg_r = CLAMP(value, 0, 255);
+		sdl_screenshot_update_palette(dlg);
+		sdl_screenshot_apply_anim_settings(dlg);
+		break;
+	case SDL_SS_INPUT_BG_G:
+		value = atoi(dlg->input_buf);
+		dlg->bg_g = CLAMP(value, 0, 255);
+		sdl_screenshot_update_palette(dlg);
+		sdl_screenshot_apply_anim_settings(dlg);
+		break;
+	case SDL_SS_INPUT_BG_B:
+		value = atoi(dlg->input_buf);
+		dlg->bg_b = CLAMP(value, 0, 255);
+		sdl_screenshot_update_palette(dlg);
+		sdl_screenshot_apply_anim_settings(dlg);
+		break;
+	default:
+		break;
+	}
+
+	sdl_screenshot_dialog_cancel_input(dlg);
+}
+
+static void sdl_screenshot_dialog_grab(TilemSdlUi *ui)
+{
+	TilemSdlScreenshotDialog *dlg;
+	TilemAnimation *anim;
+
+	if (!ui || !ui->emu || !ui->emu->calc)
+		return;
+
+	dlg = &ui->screenshot_dialog;
+	anim = tilem_calc_emulator_get_screenshot(ui->emu, dlg->grayscale);
+	if (!anim)
+		return;
+
+	dlg->current_anim_grayscale = dlg->grayscale;
+	sdl_screenshot_set_current_anim(ui, anim);
+	g_object_unref(anim);
+}
+
+static void sdl_screenshot_dialog_record_start(TilemSdlUi *ui)
+{
+	TilemSdlScreenshotDialog *dlg;
+
+	if (!ui || !ui->emu || !ui->emu->calc)
+		return;
+	dlg = &ui->screenshot_dialog;
+	if (ui->emu->anim)
+		return;
+
+	tilem_calc_emulator_begin_animation(ui->emu, dlg->grayscale);
+	dlg->current_anim_grayscale = dlg->grayscale;
+}
+
+static void sdl_screenshot_dialog_record_stop(TilemSdlUi *ui)
+{
+	TilemSdlScreenshotDialog *dlg;
+	TilemAnimation *anim;
+
+	if (!ui || !ui->emu || !ui->emu->calc)
+		return;
+	dlg = &ui->screenshot_dialog;
+
+	if (!ui->emu->anim)
+		return;
+
+	anim = tilem_calc_emulator_end_animation(ui->emu);
+	if (!anim)
+		return;
+
+	sdl_screenshot_set_current_anim(ui, anim);
+	g_object_unref(anim);
+}
+
+static gboolean sdl_screenshot_anim_is_static(TilemAnimation *anim)
+{
+	TilemAnimFrame *first;
+	TilemAnimFrame *next;
+
+	if (!anim)
+		return TRUE;
+	first = tilem_animation_next_frame(anim, NULL);
+	if (!first)
+		return TRUE;
+	next = tilem_animation_next_frame(anim, first);
+	return (next == NULL);
+}
+
+static gboolean sdl_screenshot_dialog_save(TilemSdlUi *ui)
+{
+	TilemSdlScreenshotDialog *dlg;
+	char *dir = NULL;
+	char *format = NULL;
+	char *filename = NULL;
+	char *default_name = NULL;
+	char *basename = NULL;
+	char *final_name = NULL;
+	char *format_lower = NULL;
+	char *fg = NULL;
+	char *bg = NULL;
+	const char *format_opt = NULL;
+	const char *width_opt = NULL;
+	const char *height_opt = NULL;
+	gboolean is_static;
+	gboolean used_native = FALSE;
+	GError *err = NULL;
+
+	if (!ui || !ui->emu || !ui->emu->calc)
+		return FALSE;
+	dlg = &ui->screenshot_dialog;
+	if (!dlg->current_anim)
+		return FALSE;
+
+	is_static = sdl_screenshot_anim_is_static(dlg->current_anim);
+	tilem_config_get("screenshot",
+	                 "directory/f", &dir,
+	                 "static_format/s", &format,
+	                 NULL);
+
+	if (!dir)
+		dir = g_get_current_dir();
+
+	if (!is_static) {
+		g_free(format);
+		format = g_strdup("gif");
+	}
+	else if (!format) {
+		format = g_strdup(SDL_SCREENSHOT_DEFAULT_FORMAT);
+	}
+
+	default_name = sdl_find_free_filename(dir, "screenshot", format);
+	if (default_name) {
+		basename = g_path_get_basename(default_name);
+	}
+	else {
+		basename = g_strdup_printf("screenshot.%s", format);
+	}
+
+	filename = sdl_native_file_dialog("Save Screenshot", dir, basename,
+	                                  TRUE, &used_native);
+	if (!filename) {
+		g_free(dir);
+		g_free(format);
+		g_free(default_name);
+		g_free(basename);
+		return FALSE;
+	}
+
+	if (!is_static) {
+		format_lower = g_strdup("gif");
+	}
+	else {
+		format_lower = sdl_guess_image_format(filename, format);
+		if (g_strcmp0(format_lower, "png") != 0
+		    && g_strcmp0(format_lower, "gif") != 0
+		    && g_strcmp0(format_lower, "bmp") != 0
+		    && g_strcmp0(format_lower, "jpg") != 0
+		    && g_strcmp0(format_lower, "jpeg") != 0) {
+			sdl_show_message(ui, "Screenshot",
+			                 "File name does not have a "
+			                 "recognized suffix.");
+			g_free(dir);
+			g_free(format);
+			g_free(default_name);
+			g_free(basename);
+			g_free(filename);
+			g_free(format_lower);
+			return FALSE;
+		}
+	}
+
+	final_name = sdl_ensure_extension(filename, format_lower);
+
+	sdl_screenshot_apply_anim_settings(dlg);
+	if (!tilem_animation_save(dlg->current_anim, final_name,
+	                          format_lower, NULL, NULL, &err)) {
+		sdl_report_error("Unable to save screenshot", err);
+		g_free(dir);
+		g_free(format);
+		g_free(default_name);
+		g_free(basename);
+		g_free(filename);
+		g_free(final_name);
+		g_free(format_lower);
+		return FALSE;
+	}
+
+	g_free(default_name);
+	g_free(basename);
+	g_free(filename);
+
+	fg = sdl_color_to_string(dlg->fg_r, dlg->fg_g, dlg->fg_b);
+	bg = sdl_color_to_string(dlg->bg_r, dlg->bg_g, dlg->bg_b);
+
+	if (sdl_is_wide_screen(ui)) {
+		width_opt = "width_128x64/i";
+		height_opt = "height_128x64/i";
+	}
+	else {
+		width_opt = "width_96x64/i";
+		height_opt = "height_96x64/i";
+	}
+
+	if (is_static)
+		format_opt = "static_format/s";
+
+	tilem_config_set("screenshot",
+	                 "directory/f", dir,
+	                 "grayscale/b", dlg->current_anim_grayscale,
+	                 "foreground/s", fg,
+	                 "background/s", bg,
+	                 width_opt, dlg->width,
+	                 height_opt, dlg->height,
+	                 format_opt, format_lower,
+	                 NULL);
+
+	g_free(dir);
+	g_free(format);
+	g_free(final_name);
+	g_free(format_lower);
+	g_free(fg);
+	g_free(bg);
+	return TRUE;
+}
+
+static void sdl_screenshot_dialog_open(TilemSdlUi *ui)
+{
+	TilemSdlScreenshotDialog *dlg;
+	char *fg = NULL;
+	char *bg = NULL;
+	int grayscale = 1;
+	int w96 = 0;
+	int h96 = 0;
+	int w128 = 0;
+	int h128 = 0;
+	int width;
+	int height;
+
+	if (!ui || !ui->emu || !ui->emu->calc)
+		return;
+
+	dlg = &ui->screenshot_dialog;
+	dlg->visible = TRUE;
+	dlg->size_menu_open = FALSE;
+	dlg->size_menu_hover = -1;
+	dlg->hover = SDL_SS_ITEM_NONE;
+	dlg->input_mode = SDL_SS_INPUT_NONE;
+	dlg->input_len = 0;
+	dlg->input_buf[0] = '\0';
+
+	tilem_config_get("screenshot",
+	                 "grayscale/b=1", &grayscale,
+	                 "width_96x64/i", &w96,
+	                 "height_96x64/i", &h96,
+	                 "width_128x64/i", &w128,
+	                 "height_128x64/i", &h128,
+	                 "foreground/s", &fg,
+	                 "background/s", &bg,
+	                 NULL);
+
+	dlg->grayscale = grayscale;
+	if (sdl_is_wide_screen(ui)) {
+		width = (w128 > 0 ? w128 : SDL_SCREENSHOT_DEFAULT_WIDTH_128);
+		height = (h128 > 0 ? h128 : SDL_SCREENSHOT_DEFAULT_HEIGHT_128);
+	}
+	else {
+		width = (w96 > 0 ? w96 : SDL_SCREENSHOT_DEFAULT_WIDTH_96);
+		height = (h96 > 0 ? h96 : SDL_SCREENSHOT_DEFAULT_HEIGHT_96);
+	}
+
+	dlg->fg_r = 0;
+	dlg->fg_g = 0;
+	dlg->fg_b = 0;
+	dlg->bg_r = 255;
+	dlg->bg_g = 255;
+	dlg->bg_b = 255;
+	if (fg)
+		sdl_parse_color_string(fg, &dlg->fg_r, &dlg->fg_g, &dlg->fg_b);
+	if (bg)
+		sdl_parse_color_string(bg, &dlg->bg_r, &dlg->bg_g, &dlg->bg_b);
+
+	dlg->speed = 1.0;
+
+	sdl_screenshot_set_size(ui, width, height);
+	sdl_screenshot_update_palette(dlg);
+	sdl_screenshot_dialog_grab(ui);
+
+	g_free(fg);
+	g_free(bg);
+	SDL_StopTextInput();
+	sdl_menu_hide(ui);
+}
+
+static void sdl_screenshot_dialog_close(TilemSdlUi *ui)
+{
+	TilemSdlScreenshotDialog *dlg;
+	TilemAnimation *anim;
+
+	if (!ui)
+		return;
+	dlg = &ui->screenshot_dialog;
+
+	if (ui->emu && ui->emu->anim) {
+		anim = tilem_calc_emulator_end_animation(ui->emu);
+		if (anim)
+			g_object_unref(anim);
+	}
+	sdl_screenshot_set_current_anim(ui, NULL);
+	dlg->visible = FALSE;
+	dlg->size_menu_open = FALSE;
+	dlg->size_menu_hover = -1;
+	dlg->hover = SDL_SS_ITEM_NONE;
+	sdl_screenshot_dialog_cancel_input(dlg);
+}
+
+static void sdl_screenshot_dialog_update_preview(TilemSdlUi *ui)
+{
+	TilemSdlScreenshotDialog *dlg;
+	TilemAnimFrame *next;
+	Uint32 now;
+	int duration;
+	double stretch;
+	byte *indexed = NULL;
+	guchar *rgb = NULL;
+	int w;
+	int h;
+	int i;
+	int total;
+
+	if (!ui)
+		return;
+	dlg = &ui->screenshot_dialog;
+	if (!dlg->current_anim)
+		return;
+
+	if (!dlg->preview_frame) {
+		dlg->preview_frame = tilem_animation_next_frame(
+			dlg->current_anim, NULL);
+		dlg->preview_frame_start = SDL_GetTicks();
+		dlg->preview_dirty = TRUE;
+	}
+
+	if (!dlg->preview_frame)
+		return;
+
+	now = SDL_GetTicks();
+	duration = tilem_anim_frame_get_duration(dlg->preview_frame);
+	if (dlg->speed > 0.0)
+		stretch = 1.0 / dlg->speed;
+	else
+		stretch = 1.0;
+	duration = (int) (duration * stretch + 0.5);
+	if (duration < 20)
+		duration = 20;
+
+	if (now - dlg->preview_frame_start >= (Uint32) duration) {
+		next = tilem_animation_next_frame(dlg->current_anim,
+		                                  dlg->preview_frame);
+		if (!next) {
+			next = tilem_animation_next_frame(dlg->current_anim, NULL);
+		}
+		if (next) {
+			dlg->preview_frame = next;
+			dlg->preview_frame_start = now;
+			dlg->preview_dirty = TRUE;
+		}
+	}
+
+	if (!dlg->preview_dirty)
+		return;
+
+	sdl_screenshot_free_preview(dlg);
+	if (!dlg->preview_palette)
+		sdl_screenshot_update_palette(dlg);
+
+	tilem_animation_get_indexed_image(dlg->current_anim,
+	                                  dlg->preview_frame,
+	                                  &indexed, &w, &h);
+	if (!indexed)
+		return;
+
+	total = w * h;
+	rgb = g_new(guchar, total * 3);
+	for (i = 0; i < total; i++) {
+		dword color = dlg->preview_palette[indexed[i]];
+		rgb[i * 3] = (guchar) (color >> 16);
+		rgb[i * 3 + 1] = (guchar) (color >> 8);
+		rgb[i * 3 + 2] = (guchar) color;
+	}
+
+	dlg->preview_texture = SDL_CreateTexture(
+		ui->renderer,
+		SDL_PIXELFORMAT_RGB24,
+		SDL_TEXTUREACCESS_STATIC,
+		w, h);
+	if (dlg->preview_texture) {
+		SDL_UpdateTexture(dlg->preview_texture, NULL, rgb, w * 3);
+		dlg->preview_width = w;
+		dlg->preview_height = h;
+	}
+
+	g_free(indexed);
+	g_free(rgb);
+	dlg->preview_dirty = FALSE;
+}
+
+static void sdl_draw_button(TilemSdlUi *ui, SDL_Rect rect,
+                            const char *label,
+                            gboolean hover, gboolean enabled)
+{
+	SDL_Color border = { 90, 90, 90, 255 };
+	SDL_Color fill = { 70, 70, 70, 255 };
+	SDL_Color hover_fill = { 90, 90, 90, 255 };
+	SDL_Color disabled = { 120, 120, 120, 255 };
+	SDL_Color text = { 230, 230, 230, 255 };
+	SDL_Color text_disabled = { 150, 150, 150, 255 };
+	int text_h = sdl_pref_text_height(ui);
+
+	SDL_SetRenderDrawColor(ui->renderer,
+	                       enabled
+	                           ? (hover ? hover_fill.r : fill.r)
+	                           : disabled.r,
+	                       enabled
+	                           ? (hover ? hover_fill.g : fill.g)
+	                           : disabled.g,
+	                       enabled
+	                           ? (hover ? hover_fill.b : fill.b)
+	                           : disabled.b,
+	                       255);
+	SDL_RenderFillRect(ui->renderer, &rect);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &rect);
+	sdl_draw_text_menu(ui,
+	                   rect.x + 10,
+	                   rect.y + (rect.h - text_h) / 2,
+	                   label,
+	                   enabled ? text : text_disabled);
+}
+
+static void sdl_draw_input_box(TilemSdlUi *ui, SDL_Rect rect,
+                               const char *text,
+                               gboolean active, gboolean enabled)
+{
+	SDL_Color border = { 90, 90, 90, 255 };
+	SDL_Color fill = { 40, 40, 40, 255 };
+	SDL_Color active_fill = { 60, 60, 60, 255 };
+	SDL_Color disabled = { 30, 30, 30, 255 };
+	SDL_Color text_color = { 230, 230, 230, 255 };
+	SDL_Color text_disabled = { 150, 150, 150, 255 };
+	int text_h = sdl_pref_text_height(ui);
+
+	SDL_SetRenderDrawColor(ui->renderer,
+	                       enabled
+	                           ? (active ? active_fill.r : fill.r)
+	                           : disabled.r,
+	                       enabled
+	                           ? (active ? active_fill.g : fill.g)
+	                           : disabled.g,
+	                       enabled
+	                           ? (active ? active_fill.b : fill.b)
+	                           : disabled.b,
+	                       255);
+	SDL_RenderFillRect(ui->renderer, &rect);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &rect);
+	sdl_draw_text_menu(ui,
+	                   rect.x + 6,
+	                   rect.y + (rect.h - text_h) / 2,
+	                   text ? text : "",
+	                   enabled ? text_color : text_disabled);
+}
+
+static void sdl_render_screenshot_dialog(TilemSdlUi *ui)
+{
+	TilemSdlScreenshotDialog *dlg;
+	TilemSdlScreenshotLayout layout;
+	SDL_Color overlay = { 0, 0, 0, 150 };
+	SDL_Color panel = { 45, 45, 45, 240 };
+	SDL_Color border = { 90, 90, 90, 255 };
+	SDL_Color text = { 230, 230, 230, 255 };
+	SDL_Color dim = { 160, 160, 160, 255 };
+	SDL_Color highlight = { 70, 120, 180, 120 };
+	SDL_Rect preview_inner;
+	SDL_Rect dst;
+	char buf[64];
+	char size_label[32];
+	int text_h;
+	int count;
+	const TilemSdlScreenshotSize *sizes;
+	gboolean can_interact;
+	gboolean can_save;
+	gboolean can_grab;
+	gboolean can_record;
+	gboolean can_stop;
+	gboolean is_recording;
+
+	if (!ui)
+		return;
+	dlg = &ui->screenshot_dialog;
+	if (!dlg->visible)
+		return;
+
+	sdl_screenshot_dialog_layout(ui, &layout);
+	text_h = layout.text_h;
+
+	SDL_SetRenderDrawBlendMode(ui->renderer, SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(ui->renderer, overlay.r, overlay.g,
+	                       overlay.b, overlay.a);
+	SDL_RenderFillRect(ui->renderer, NULL);
+
+	SDL_SetRenderDrawColor(ui->renderer, panel.r, panel.g,
+	                       panel.b, panel.a);
+	SDL_RenderFillRect(ui->renderer, &layout.panel);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &layout.panel);
+
+	sdl_draw_text_menu(ui,
+	                   layout.panel.x + layout.padding,
+	                   layout.panel.y + layout.padding - 2,
+	                   "Screenshot",
+	                   text);
+
+	preview_inner = layout.preview_rect;
+	SDL_SetRenderDrawColor(ui->renderer, 30, 30, 30, 255);
+	SDL_RenderFillRect(ui->renderer, &preview_inner);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &preview_inner);
+
+	sdl_screenshot_dialog_update_preview(ui);
+	if (dlg->preview_texture && dlg->preview_width > 0
+	    && dlg->preview_height > 0) {
+		double scale_x = (double) preview_inner.w / dlg->preview_width;
+		double scale_y = (double) preview_inner.h / dlg->preview_height;
+		double scale = MIN(scale_x, scale_y);
+		if (scale <= 0.0)
+			scale = 1.0;
+		dst.w = (int) (dlg->preview_width * scale);
+		dst.h = (int) (dlg->preview_height * scale);
+		dst.x = preview_inner.x + (preview_inner.w - dst.w) / 2;
+		dst.y = preview_inner.y + (preview_inner.h - dst.h) / 2;
+		SDL_RenderCopy(ui->renderer, dlg->preview_texture, NULL, &dst);
+	}
+	else {
+		sdl_draw_text_menu(ui,
+		                   preview_inner.x + 10,
+		                   preview_inner.y + 10,
+		                   "No preview",
+		                   dim);
+	}
+
+	can_interact = ui->emu && ui->emu->calc;
+	is_recording = can_interact && ui->emu->anim;
+	can_grab = can_interact && !is_recording;
+	can_record = can_interact && !is_recording;
+	can_stop = can_interact && is_recording;
+	can_save = (dlg->current_anim != NULL) && !is_recording;
+
+	sdl_draw_button(ui, layout.grab_rect, "Grab",
+	                dlg->hover == SDL_SS_ITEM_GRAB, can_grab);
+	sdl_draw_button(ui, layout.record_rect, "Record",
+	                dlg->hover == SDL_SS_ITEM_RECORD, can_record);
+	sdl_draw_button(ui, layout.stop_rect, "Stop",
+	                dlg->hover == SDL_SS_ITEM_STOP, can_stop);
+
+	if (dlg->hover == SDL_SS_ITEM_GRAYSCALE) {
+		SDL_SetRenderDrawColor(ui->renderer, highlight.r,
+		                       highlight.g, highlight.b,
+		                       highlight.a);
+		SDL_RenderFillRect(ui->renderer, &layout.grayscale_rect);
+	}
+	sdl_draw_checkbox(ui->renderer,
+	                  (SDL_Rect) { layout.grayscale_rect.x + 4,
+	                               layout.grayscale_rect.y
+	                                   + (layout.grayscale_rect.h - 16) / 2,
+	                               16, 16 },
+	                  dlg->grayscale,
+	                  border,
+	                  (SDL_Color) { 30, 30, 30, 255 },
+	                  (SDL_Color) { 210, 210, 210, 255 });
+	sdl_draw_text_menu(ui,
+	                   layout.grayscale_rect.x + 28,
+	                   layout.grayscale_rect.y
+	                       + (layout.grayscale_rect.h - text_h) / 2,
+	                   "Grayscale",
+	                   text);
+
+	if (dlg->hover == SDL_SS_ITEM_SIZE) {
+		SDL_SetRenderDrawColor(ui->renderer, highlight.r,
+		                       highlight.g, highlight.b,
+		                       highlight.a);
+		SDL_RenderFillRect(ui->renderer, &layout.size_rect);
+	}
+	sdl_draw_text_menu(ui,
+	                   layout.size_rect.x,
+	                   layout.size_rect.y
+	                       + (layout.size_rect.h - text_h) / 2,
+	                   "Image size:",
+	                   text);
+	sizes = sdl_screenshot_sizes_for_calc(ui, &count);
+	sdl_screenshot_size_label(sizes, count, dlg->selected_size,
+	                          size_label, sizeof(size_label));
+	sdl_draw_input_box(ui,
+	                   (SDL_Rect) {
+	                       layout.size_rect.x + 120,
+	                       layout.size_rect.y,
+	                       layout.size_rect.w - 120,
+	                       layout.size_rect.h
+	                   },
+	                   size_label,
+	                   dlg->size_menu_open,
+	                   TRUE);
+
+	sdl_draw_text_menu(ui,
+	                   layout.width_rect.x,
+	                   layout.width_rect.y
+	                       + (layout.width_rect.h - text_h) / 2,
+	                   "Width:",
+	                   text);
+	snprintf(buf, sizeof(buf), "%d", dlg->width);
+	sdl_draw_input_box(ui,
+	                   (SDL_Rect) {
+	                       layout.width_rect.x + 80,
+	                       layout.width_rect.y,
+	                       layout.width_rect.w - 80,
+	                       layout.width_rect.h
+	                   },
+	                   buf,
+	                   dlg->input_mode == SDL_SS_INPUT_WIDTH,
+	                   TRUE);
+
+	sdl_draw_text_menu(ui,
+	                   layout.height_rect.x,
+	                   layout.height_rect.y
+	                       + (layout.height_rect.h - text_h) / 2,
+	                   "Height:",
+	                   text);
+	snprintf(buf, sizeof(buf), "%d", dlg->height);
+	sdl_draw_input_box(ui,
+	                   (SDL_Rect) {
+	                       layout.height_rect.x + 80,
+	                       layout.height_rect.y,
+	                       layout.height_rect.w - 80,
+	                       layout.height_rect.h
+	                   },
+	                   buf,
+	                   dlg->input_mode == SDL_SS_INPUT_HEIGHT,
+	                   TRUE);
+
+	sdl_draw_text_menu(ui,
+	                   layout.speed_rect.x,
+	                   layout.speed_rect.y
+	                       + (layout.speed_rect.h - text_h) / 2,
+	                   "Animation speed:",
+	                   text);
+	snprintf(buf, sizeof(buf), "%.1f", dlg->speed);
+	sdl_draw_input_box(ui,
+	                   (SDL_Rect) {
+	                       layout.speed_rect.x + 140,
+	                       layout.speed_rect.y,
+	                       layout.speed_rect.w - 140,
+	                       layout.speed_rect.h
+	                   },
+	                   buf,
+	                   dlg->input_mode == SDL_SS_INPUT_SPEED,
+	                   TRUE);
+
+	sdl_draw_text_menu(ui,
+	                   layout.fg_label_rect.x,
+	                   layout.fg_label_rect.y
+	                       + (layout.fg_label_rect.h - text_h) / 2,
+	                   "Foreground:",
+	                   text);
+	snprintf(buf, sizeof(buf), "%d", dlg->fg_r);
+	sdl_draw_input_box(ui, layout.fg_r_rect, buf,
+	                   dlg->input_mode == SDL_SS_INPUT_FG_R, TRUE);
+	snprintf(buf, sizeof(buf), "%d", dlg->fg_g);
+	sdl_draw_input_box(ui, layout.fg_g_rect, buf,
+	                   dlg->input_mode == SDL_SS_INPUT_FG_G, TRUE);
+	snprintf(buf, sizeof(buf), "%d", dlg->fg_b);
+	sdl_draw_input_box(ui, layout.fg_b_rect, buf,
+	                   dlg->input_mode == SDL_SS_INPUT_FG_B, TRUE);
+	SDL_SetRenderDrawColor(ui->renderer, dlg->fg_r, dlg->fg_g,
+	                       dlg->fg_b, 255);
+	SDL_RenderFillRect(ui->renderer, &layout.fg_color_rect);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &layout.fg_color_rect);
+
+	sdl_draw_text_menu(ui,
+	                   layout.bg_label_rect.x,
+	                   layout.bg_label_rect.y
+	                       + (layout.bg_label_rect.h - text_h) / 2,
+	                   "Background:",
+	                   text);
+	snprintf(buf, sizeof(buf), "%d", dlg->bg_r);
+	sdl_draw_input_box(ui, layout.bg_r_rect, buf,
+	                   dlg->input_mode == SDL_SS_INPUT_BG_R, TRUE);
+	snprintf(buf, sizeof(buf), "%d", dlg->bg_g);
+	sdl_draw_input_box(ui, layout.bg_g_rect, buf,
+	                   dlg->input_mode == SDL_SS_INPUT_BG_G, TRUE);
+	snprintf(buf, sizeof(buf), "%d", dlg->bg_b);
+	sdl_draw_input_box(ui, layout.bg_b_rect, buf,
+	                   dlg->input_mode == SDL_SS_INPUT_BG_B, TRUE);
+	SDL_SetRenderDrawColor(ui->renderer, dlg->bg_r, dlg->bg_g,
+	                       dlg->bg_b, 255);
+	SDL_RenderFillRect(ui->renderer, &layout.bg_color_rect);
+	SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+	                       border.b, border.a);
+	SDL_RenderDrawRect(ui->renderer, &layout.bg_color_rect);
+
+	sdl_draw_button(ui, layout.save_rect, "Save",
+	                dlg->hover == SDL_SS_ITEM_SAVE, can_save);
+	sdl_draw_button(ui, layout.cancel_rect, "Cancel",
+	                dlg->hover == SDL_SS_ITEM_CANCEL, TRUE);
+
+	if (dlg->size_menu_open) {
+		SDL_Rect menu_rect;
+		int item_h = layout.row_h;
+		int i;
+		menu_rect.x = layout.size_rect.x + 120;
+		menu_rect.y = layout.size_rect.y + layout.size_rect.h + 2;
+		menu_rect.w = layout.size_rect.w - 120;
+		menu_rect.h = (count + 1) * item_h + SDL_MENU_SPACING * 2;
+
+		SDL_SetRenderDrawColor(ui->renderer, 40, 40, 40, 240);
+		SDL_RenderFillRect(ui->renderer, &menu_rect);
+		SDL_SetRenderDrawColor(ui->renderer, border.r, border.g,
+		                       border.b, border.a);
+		SDL_RenderDrawRect(ui->renderer, &menu_rect);
+
+		for (i = 0; i <= count; i++) {
+			SDL_Rect item = {
+				menu_rect.x,
+				menu_rect.y + SDL_MENU_SPACING + i * item_h,
+				menu_rect.w,
+				item_h
+			};
+			if (i == dlg->size_menu_hover) {
+				SDL_SetRenderDrawColor(ui->renderer,
+				                       highlight.r, highlight.g,
+				                       highlight.b, highlight.a);
+				SDL_RenderFillRect(ui->renderer, &item);
+			}
+			sdl_screenshot_size_label(sizes, count, i,
+			                          size_label,
+			                          sizeof(size_label));
+			sdl_draw_text_menu(ui,
+			                   item.x + 6,
+			                   item.y + (item.h - text_h) / 2,
+			                   size_label,
+			                   text);
+		}
+	}
+
+	SDL_SetRenderDrawBlendMode(ui->renderer, SDL_BLENDMODE_NONE);
+}
+
+static gboolean sdl_screenshot_dialog_handle_event(TilemSdlUi *ui,
+                                                   const SDL_Event *event)
+{
+	TilemSdlScreenshotDialog *dlg;
+	TilemSdlScreenshotLayout layout;
+	TilemSdlScreenshotItem hit;
+	const TilemSdlScreenshotSize *sizes;
+	SDL_Rect menu_rect;
+	int count;
+	int item_h;
+	int idx;
+
+	if (!ui || !event)
+		return FALSE;
+	dlg = &ui->screenshot_dialog;
+	if (!dlg->visible)
+		return FALSE;
+
+	sdl_screenshot_dialog_layout(ui, &layout);
+
+	switch (event->type) {
+	case SDL_MOUSEMOTION:
+		dlg->hover = sdl_screenshot_dialog_hit_test(
+			ui, &layout, event->motion.x, event->motion.y);
+		if (dlg->size_menu_open) {
+			sizes = sdl_screenshot_sizes_for_calc(ui, &count);
+			item_h = layout.row_h;
+			menu_rect.x = layout.size_rect.x + 120;
+			menu_rect.y = layout.size_rect.y + layout.size_rect.h + 2;
+			menu_rect.w = layout.size_rect.w - 120;
+			menu_rect.h = (count + 1) * item_h + SDL_MENU_SPACING * 2;
+
+			if (sdl_point_in_rect(event->motion.x,
+			                      event->motion.y,
+			                      &menu_rect)) {
+				idx = (event->motion.y - menu_rect.y
+				       - SDL_MENU_SPACING) / item_h;
+				if (idx >= 0 && idx <= count)
+					dlg->size_menu_hover = idx;
+				else
+					dlg->size_menu_hover = -1;
+			}
+			else {
+				dlg->size_menu_hover = -1;
+			}
+		}
+		return TRUE;
+	case SDL_MOUSEBUTTONDOWN:
+		if (event->button.button != SDL_BUTTON_LEFT) {
+			return TRUE;
+		}
+		if (!sdl_point_in_rect(event->button.x,
+		                       event->button.y,
+		                       &layout.panel)) {
+			sdl_screenshot_dialog_close(ui);
+			return TRUE;
+		}
+		if (dlg->size_menu_open) {
+			sizes = sdl_screenshot_sizes_for_calc(ui, &count);
+			item_h = layout.row_h;
+			menu_rect.x = layout.size_rect.x + 120;
+			menu_rect.y = layout.size_rect.y + layout.size_rect.h + 2;
+			menu_rect.w = layout.size_rect.w - 120;
+			menu_rect.h = (count + 1) * item_h + SDL_MENU_SPACING * 2;
+			if (sdl_point_in_rect(event->button.x,
+			                      event->button.y,
+			                      &menu_rect)) {
+				idx = (event->button.y - menu_rect.y
+				       - SDL_MENU_SPACING) / item_h;
+				if (idx >= 0 && idx <= count) {
+					dlg->selected_size = idx;
+					if (idx < count) {
+						sdl_screenshot_set_size(
+							ui,
+							sizes[idx].width,
+							sizes[idx].height);
+					}
+					dlg->size_menu_open = FALSE;
+					dlg->size_menu_hover = -1;
+				}
+				return TRUE;
+			}
+			dlg->size_menu_open = FALSE;
+			dlg->size_menu_hover = -1;
+		}
+
+		hit = sdl_screenshot_dialog_hit_test(
+			ui, &layout, event->button.x, event->button.y);
+		switch (hit) {
+		case SDL_SS_ITEM_GRAB:
+			if (!ui->emu->anim)
+				sdl_screenshot_dialog_grab(ui);
+			break;
+		case SDL_SS_ITEM_RECORD:
+			sdl_screenshot_dialog_record_start(ui);
+			break;
+		case SDL_SS_ITEM_STOP:
+			sdl_screenshot_dialog_record_stop(ui);
+			break;
+		case SDL_SS_ITEM_GRAYSCALE:
+			dlg->grayscale = !dlg->grayscale;
+			break;
+		case SDL_SS_ITEM_SIZE:
+			dlg->size_menu_open = !dlg->size_menu_open;
+			dlg->size_menu_hover = -1;
+			break;
+		case SDL_SS_ITEM_WIDTH:
+			snprintf(dlg->input_buf, sizeof(dlg->input_buf),
+			         "%d", dlg->width);
+			sdl_screenshot_dialog_start_input(
+				dlg, SDL_SS_INPUT_WIDTH, dlg->input_buf);
+			break;
+		case SDL_SS_ITEM_HEIGHT:
+			snprintf(dlg->input_buf, sizeof(dlg->input_buf),
+			         "%d", dlg->height);
+			sdl_screenshot_dialog_start_input(
+				dlg, SDL_SS_INPUT_HEIGHT, dlg->input_buf);
+			break;
+		case SDL_SS_ITEM_SPEED:
+			snprintf(dlg->input_buf, sizeof(dlg->input_buf),
+			         "%.1f", dlg->speed);
+			sdl_screenshot_dialog_start_input(
+				dlg, SDL_SS_INPUT_SPEED, dlg->input_buf);
+			break;
+		case SDL_SS_ITEM_FG_R:
+			snprintf(dlg->input_buf, sizeof(dlg->input_buf),
+			         "%d", dlg->fg_r);
+			sdl_screenshot_dialog_start_input(
+				dlg, SDL_SS_INPUT_FG_R, dlg->input_buf);
+			break;
+		case SDL_SS_ITEM_FG_G:
+			snprintf(dlg->input_buf, sizeof(dlg->input_buf),
+			         "%d", dlg->fg_g);
+			sdl_screenshot_dialog_start_input(
+				dlg, SDL_SS_INPUT_FG_G, dlg->input_buf);
+			break;
+		case SDL_SS_ITEM_FG_B:
+			snprintf(dlg->input_buf, sizeof(dlg->input_buf),
+			         "%d", dlg->fg_b);
+			sdl_screenshot_dialog_start_input(
+				dlg, SDL_SS_INPUT_FG_B, dlg->input_buf);
+			break;
+		case SDL_SS_ITEM_BG_R:
+			snprintf(dlg->input_buf, sizeof(dlg->input_buf),
+			         "%d", dlg->bg_r);
+			sdl_screenshot_dialog_start_input(
+				dlg, SDL_SS_INPUT_BG_R, dlg->input_buf);
+			break;
+		case SDL_SS_ITEM_BG_G:
+			snprintf(dlg->input_buf, sizeof(dlg->input_buf),
+			         "%d", dlg->bg_g);
+			sdl_screenshot_dialog_start_input(
+				dlg, SDL_SS_INPUT_BG_G, dlg->input_buf);
+			break;
+		case SDL_SS_ITEM_BG_B:
+			snprintf(dlg->input_buf, sizeof(dlg->input_buf),
+			         "%d", dlg->bg_b);
+			sdl_screenshot_dialog_start_input(
+				dlg, SDL_SS_INPUT_BG_B, dlg->input_buf);
+			break;
+		case SDL_SS_ITEM_SAVE:
+			if (dlg->current_anim && !ui->emu->anim)
+				sdl_screenshot_dialog_save(ui);
+			break;
+		case SDL_SS_ITEM_CANCEL:
+			sdl_screenshot_dialog_close(ui);
+			break;
+		default:
+			break;
+		}
+		return TRUE;
+	case SDL_KEYDOWN:
+		if (dlg->size_menu_open
+		    && event->key.keysym.sym == SDLK_ESCAPE) {
+			dlg->size_menu_open = FALSE;
+			return TRUE;
+		}
+		if (dlg->input_mode != SDL_SS_INPUT_NONE) {
+			if (event->key.keysym.sym == SDLK_RETURN
+			    || event->key.keysym.sym == SDLK_KP_ENTER) {
+				sdl_screenshot_dialog_apply_input(ui);
+				return TRUE;
+			}
+			if (event->key.keysym.sym == SDLK_ESCAPE) {
+				sdl_screenshot_dialog_cancel_input(dlg);
+				return TRUE;
+			}
+			if (event->key.keysym.sym == SDLK_BACKSPACE) {
+				if (dlg->input_len > 0) {
+					dlg->input_len--;
+					dlg->input_buf[dlg->input_len] = '\0';
+				}
+				return TRUE;
+			}
+		}
+		if (event->key.keysym.sym == SDLK_ESCAPE) {
+			sdl_screenshot_dialog_close(ui);
+			return TRUE;
+		}
+		if (event->key.keysym.sym == SDLK_RETURN
+		    || event->key.keysym.sym == SDLK_KP_ENTER) {
+			if (dlg->current_anim && !ui->emu->anim)
+				sdl_screenshot_dialog_save(ui);
+			return TRUE;
+		}
+		return TRUE;
+	case SDL_TEXTINPUT:
+		if (dlg->input_mode == SDL_SS_INPUT_NONE)
+			return TRUE;
+		if (dlg->input_len >= (int) sizeof(dlg->input_buf) - 1)
+			return TRUE;
+		if (dlg->input_mode == SDL_SS_INPUT_SPEED) {
+			if (event->text.text[0] != '.'
+			    && !g_ascii_isdigit(event->text.text[0]))
+				return TRUE;
+		}
+		else if (!g_ascii_isdigit(event->text.text[0])) {
+			return TRUE;
+		}
+		dlg->input_buf[dlg->input_len] = event->text.text[0];
+		dlg->input_len++;
+		dlg->input_buf[dlg->input_len] = '\0';
+		return TRUE;
+	default:
+		break;
+	}
+
+	return TRUE;
+}
+
 static int sdl_string_to_slot(const char *str)
 {
 	if (!str)
@@ -4219,6 +5845,7 @@ static void sdl_render(TilemSdlUi *ui)
 	sdl_render_preferences(ui);
 	sdl_render_slot_dialog(ui);
 	sdl_render_receive_dialog(ui);
+	sdl_render_screenshot_dialog(ui);
 	SDL_RenderPresent(ui->renderer);
 }
 
@@ -4496,38 +6123,6 @@ static char **sdl_pick_send_files(TilemSdlUi *ui)
 	}
 
 	return filenames;
-}
-
-static char *sdl_pick_screenshot_file(TilemSdlUi *ui)
-{
-	char *dir = NULL;
-	char *filename;
-	gboolean used_native = FALSE;
-
-	if (!ui->emu->calc)
-		return NULL;
-
-	tilem_config_get("screenshot", "directory/f", &dir, NULL);
-	if (!dir)
-		dir = g_get_current_dir();
-
-	filename = sdl_native_file_dialog("Save Screenshot", dir,
-	                                  "screenshot.png", TRUE,
-	                                  &used_native);
-	g_free(dir);
-
-	if (!filename && !used_native) {
-		sdl_show_message(ui, "Screenshot",
-		                 "No native file picker available.");
-	}
-
-	if (filename) {
-		dir = g_path_get_dirname(filename);
-		tilem_config_set("screenshot", "directory/f", dir, NULL);
-		g_free(dir);
-	}
-
-	return filename;
 }
 
 static char *sdl_pick_macro_file(TilemSdlUi *ui)
@@ -5177,41 +6772,12 @@ static void sdl_handle_macro_save(TilemSdlUi *ui)
 
 static void sdl_handle_screenshot(TilemSdlUi *ui)
 {
-	GError *err = NULL;
-	char *filename;
-	char *default_format = NULL;
-	char *format;
-	char *final_name;
-	int width;
-	int height;
-
 	if (!ui->emu->calc) {
 		sdl_show_message(ui, "Screenshot",
 		                 "No calculator loaded yet.");
 		return;
 	}
-
-	filename = sdl_pick_screenshot_file(ui);
-	if (!filename)
-		return;
-
-	tilem_config_get("screenshot", "format/s", &default_format, NULL);
-	format = sdl_guess_image_format(filename, default_format);
-	final_name = sdl_ensure_extension(filename, format);
-	sdl_get_screenshot_size(ui, &width, &height);
-	if (!ui->lcd_palette)
-		sdl_set_palette(ui);
-
-	if (!tilem_sdl_save_screenshot(ui->emu, ui->lcd_smooth_scale,
-	                               ui->lcd_palette, width, height,
-	                               final_name, format, &err)) {
-		sdl_report_error("Unable to save screenshot", err);
-	}
-
-	g_free(default_format);
-	g_free(format);
-	g_free(final_name);
-	g_free(filename);
+	sdl_screenshot_dialog_open(ui);
 }
 
 static void sdl_handle_quick_screenshot(TilemSdlUi *ui)
@@ -5418,6 +6984,15 @@ static void sdl_cleanup(TilemSdlUi *ui)
 
 	sdl_slot_dialog_clear(ui);
 	sdl_receive_dialog_clear(ui);
+	if (ui->screenshot_dialog.current_anim) {
+		g_object_unref(ui->screenshot_dialog.current_anim);
+		ui->screenshot_dialog.current_anim = NULL;
+	}
+	sdl_screenshot_free_preview(&ui->screenshot_dialog);
+	if (ui->screenshot_dialog.preview_palette) {
+		tilem_free(ui->screenshot_dialog.preview_palette);
+		ui->screenshot_dialog.preview_palette = NULL;
+	}
 	if (ui->drop_files) {
 		g_ptr_array_free(ui->drop_files, TRUE);
 		ui->drop_files = NULL;
@@ -5638,6 +7213,9 @@ int tilem_sdl_run(TilemCalcEmulator *emu, const TilemSdlOptions *opts)
 			if (ui.debugger
 			    && tilem_sdl_debugger_handle_event(
 			           ui.debugger, &event))
+				continue;
+			if (ui.screenshot_dialog.visible
+			    && sdl_screenshot_dialog_handle_event(&ui, &event))
 				continue;
 			if (ui.slot_dialog.visible
 			    && sdl_slot_dialog_handle_event(&ui, &event))
